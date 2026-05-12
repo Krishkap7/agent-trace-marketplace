@@ -102,6 +102,160 @@ def test_atif_still_detected_when_swe_agent_keys_partial(tmp_path: Path) -> None
 
 
 # --------------------------------------------------------------------------- #
+# Cursor (.cursor.json extension OR .json with v1 envelope shape) detection
+# --------------------------------------------------------------------------- #
+
+
+def test_detects_cursor_from_extension_hint(tmp_path: Path) -> None:
+    p = _write(
+        tmp_path / "session.cursor.json",
+        json.dumps(
+            {
+                "session_id": "x",
+                "messages": [{"role": "user", "content": "hi"}],
+            }
+        ),
+    )
+    assert detect_format(p) == "cursor"
+
+
+def test_detects_cursor_from_envelope_shape_without_extension(tmp_path: Path) -> None:
+    p = _write(
+        tmp_path / "plain.json",
+        json.dumps(
+            {
+                "session_id": "x",
+                "messages": [{"role": "assistant", "content": "yo"}],
+            }
+        ),
+    )
+    assert detect_format(p) == "cursor"
+
+
+def test_cursor_envelope_requires_role_on_first_message(tmp_path: Path) -> None:
+    """Without a ``role`` field on messages[0] the file could be any
+    other ``{session_id, messages}`` JSON; we don't claim it for Cursor."""
+    p = _write(
+        tmp_path / "ambiguous.json",
+        json.dumps({"session_id": "x", "messages": [{"text": "hi"}]}),
+    )
+    assert detect_format(p) == "unknown"
+
+
+def test_cursor_envelope_requires_non_empty_messages(tmp_path: Path) -> None:
+    p = _write(
+        tmp_path / "ambiguous.json",
+        json.dumps({"session_id": "x", "messages": []}),
+    )
+    assert detect_format(p) == "unknown"
+
+
+def test_cursor_takes_precedence_over_atif_schema_version(tmp_path: Path) -> None:
+    """The ``.cursor.json`` extension is an unambiguous Cursor signal
+    even when the body somehow also carries ATIF schema markers."""
+    p = _write(
+        tmp_path / "weird.cursor.json",
+        json.dumps(
+            {
+                "schema_version": "ATIF-v1.7",
+                "session_id": "x",
+                "messages": [{"role": "user", "content": "hi"}],
+            }
+        ),
+    )
+    assert detect_format(p) == "cursor"
+
+
+# --------------------------------------------------------------------------- #
+# Codex (.jsonl with OpenAI Responses-API outer event types) detection
+# --------------------------------------------------------------------------- #
+
+
+def test_detects_codex_from_session_meta_first_line(tmp_path: Path) -> None:
+    p = _write(
+        tmp_path / "codex.jsonl",
+        json.dumps(
+            {
+                "type": "session_meta",
+                "payload": {"id": "sess-1", "cli_version": "0.32.0"},
+            }
+        ),
+    )
+    assert detect_format(p) == "codex"
+
+
+def test_detects_codex_from_response_item_first_line(tmp_path: Path) -> None:
+    """If a Codex JSONL gets sliced (no session_meta head), the first
+    response_item line should still classify."""
+    p = _write(
+        tmp_path / "codex_no_head.jsonl",
+        json.dumps(
+            {
+                "type": "response_item",
+                "payload": {"type": "message", "role": "user", "content": []},
+            }
+        ),
+    )
+    assert detect_format(p) == "codex"
+
+
+def test_codex_takes_precedence_over_claude_code(tmp_path: Path) -> None:
+    """Codex's outer vocabulary doesn't overlap with Claude Code's. This
+    test pins that ordering -- if a future event type collides, we'll
+    catch it here."""
+    p = _write(
+        tmp_path / "ambiguous.jsonl",
+        json.dumps(
+            {
+                "type": "session_meta",
+                "sessionId": "ALSO_claude_looking",
+                "payload": {"id": "x"},
+            }
+        ),
+    )
+    assert detect_format(p) == "codex"
+
+
+def test_claude_code_still_wins_when_no_codex_marker(tmp_path: Path) -> None:
+    """The discriminator: Claude Code first lines carry camelCase
+    `sessionId` and have a vocabulary type like `permission-mode`."""
+    p = _write(
+        tmp_path / "cc.jsonl",
+        json.dumps(
+            {
+                "type": "permission-mode",
+                "sessionId": "abc-123",
+                "mode": "auto",
+            }
+        ),
+    )
+    assert detect_format(p) == "claude_code"
+
+
+def test_jsonl_with_unknown_top_level_type_is_unknown(tmp_path: Path) -> None:
+    p = _write(
+        tmp_path / "weird.jsonl",
+        json.dumps({"type": "completely-made-up-type", "payload": {}}),
+    )
+    assert detect_format(p) == "unknown"
+
+
+def test_detects_codex_from_compacted_first_line(tmp_path: Path) -> None:
+    """Forked Codex sessions can start with a `compacted` record. This
+    is the 5th variant of RolloutItem per codex-rs/protocol/src/protocol.rs."""
+    p = _write(
+        tmp_path / "forked.jsonl",
+        json.dumps(
+            {
+                "type": "compacted",
+                "payload": {"message": "summary text", "replacement_history": []},
+            }
+        ),
+    )
+    assert detect_format(p) == "codex"
+
+
+# --------------------------------------------------------------------------- #
 # Claude Code (.jsonl) detection
 # --------------------------------------------------------------------------- #
 
