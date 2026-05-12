@@ -359,3 +359,35 @@ def test_does_not_raise_when_json_path_is_a_directory(tmp_path: Path) -> None:
     dir_with_json_suffix = tmp_path / "wat.json"
     dir_with_json_suffix.mkdir()
     assert detect_format(dir_with_json_suffix) == "unknown"
+
+
+# --------------------------------------------------------------------------- #
+# Adapter <-> detector constants -- single source of truth
+# --------------------------------------------------------------------------- #
+#
+# These tests pin the post-bugbot invariant: the detector must NOT carry
+# its own copy of any adapter-owned format-shape constant. Drift between
+# the two used to manifest as files that pass detection but are rejected
+# by the adapter, or vice versa, with no obvious link between the two
+# definitions. (Caught by Cursor bugbot on PR #2 commit 3dd7a3e.)
+
+
+def test_swe_agent_required_keys_is_the_adapter_constant() -> None:
+    """``detect.SWE_AGENT_REQUIRED_KEYS`` must BE
+    ``swe_agent.REQUIRED_TOP_LEVEL_KEYS`` -- not a copy of equal value.
+    ``is`` (object identity) catches the most likely drift mode where
+    someone re-introduces a local frozenset literal in detect.py with
+    the same contents today but diverging contents tomorrow."""
+    from trace_marketplace.adapters import swe_agent as swe_agent_adapter
+    from trace_marketplace.ingest import detect
+
+    assert detect.SWE_AGENT_REQUIRED_KEYS is swe_agent_adapter.REQUIRED_TOP_LEVEL_KEYS
+
+
+def test_codex_outer_event_types_is_the_adapter_constant() -> None:
+    """``detect.CODEX_OUTER_EVENT_TYPES`` must BE
+    ``codex.OUTER_EVENT_TYPES`` (same object). See note above."""
+    from trace_marketplace.adapters import codex as codex_adapter
+    from trace_marketplace.ingest import detect
+
+    assert detect.CODEX_OUTER_EVENT_TYPES is codex_adapter.OUTER_EVENT_TYPES

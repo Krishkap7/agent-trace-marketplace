@@ -64,6 +64,13 @@ SCHEMA_VERSION = "ATIF-v1.7"
 AGENT_NAME = "swe-agent"
 EVAL_LOGS_TRUNCATE_BYTES = 10_000
 
+# Top-level keys every SWE-agent HF row carries (verified during slice 2.5
+# Step-0 inspection of nebius/SWE-agent-trajectories shard 0).
+#
+# SINGLE SOURCE OF TRUTH for this set: ``trace_marketplace.ingest.detect``
+# imports this constant (aliased to ``SWE_AGENT_REQUIRED_KEYS``) so the
+# format detector and the adapter cannot disagree on what counts as a
+# valid SWE-agent row. Edit here, never in the detector.
 REQUIRED_TOP_LEVEL_KEYS: frozenset[str] = frozenset(
     {"instance_id", "model_name", "target", "trajectory"}
 )

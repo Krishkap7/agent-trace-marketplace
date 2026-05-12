@@ -17,8 +17,6 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 from trace_marketplace.ingest.pipeline import (
     _extract_raw_identity,
     _trace_id_for,

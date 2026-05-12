@@ -57,6 +57,14 @@ log = logging.getLogger(__name__)
 SCHEMA_VERSION = "ATIF-v1.7"
 AGENT_NAME = "codex"
 
+# Outer event types Codex sessions emit. Matches the five-variant
+# ``RolloutItem`` enum in ``codex-rs/protocol/src/protocol.rs`` on the
+# OpenAI Codex CLI (serde-renamed to snake_case).
+#
+# SINGLE SOURCE OF TRUTH for this set: ``trace_marketplace.ingest.detect``
+# imports this constant (aliased to ``CODEX_OUTER_EVENT_TYPES``) so the
+# format detector's first-line classifier and the adapter's outer-event
+# loop cannot disagree. Edit here, never in the detector.
 OUTER_EVENT_TYPES: frozenset[str] = frozenset(
     {"session_meta", "turn_context", "response_item", "event_msg", "compacted"}
 )

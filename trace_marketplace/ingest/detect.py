@@ -15,28 +15,28 @@ import logging
 from pathlib import Path
 from typing import Literal
 
+# Re-export the format-shape constants the adapters already own, so the
+# detector and the adapter can never disagree on what counts as a valid
+# row of a given format. Caught by Cursor bugbot on PR #2 commit 3dd7a3e:
+# slice 2.5 / 2.6 had two independently-edited copies of the SWE-agent
+# and Codex frozensets in detect.py vs the adapter modules, with no
+# obvious link between them.
+from trace_marketplace.adapters.codex import (
+    OUTER_EVENT_TYPES as CODEX_OUTER_EVENT_TYPES,
+)
+from trace_marketplace.adapters.swe_agent import (
+    REQUIRED_TOP_LEVEL_KEYS as SWE_AGENT_REQUIRED_KEYS,
+)
+
 log = logging.getLogger(__name__)
 
 FormatName = Literal["atif", "claude_code", "codex", "cursor", "swe_agent", "unknown"]
 
 # Top-level keys a Cursor v1 export envelope must carry. ``messages`` is
 # the discriminator from ATIF (uses ``steps``) and from SWE-agent (uses
-# ``trajectory``).
+# ``trajectory``). This constant has no adapter-side twin -- the Cursor
+# adapter probes for these fields inline -- so it's owned here.
 CURSOR_REQUIRED_KEYS: frozenset[str] = frozenset({"session_id", "messages"})
-
-# Top-level keys every SWE-agent HF row carries (verified during slice 2.5
-# Step-0 inspection of nebius/SWE-agent-trajectories shard 0).
-SWE_AGENT_REQUIRED_KEYS: frozenset[str] = frozenset(
-    {"instance_id", "model_name", "target", "trajectory"}
-)
-
-# Outer event types Codex sessions emit. Matches the five-variant
-# ``RolloutItem`` enum in ``codex-rs/protocol/src/protocol.rs`` on the
-# OpenAI Codex CLI (serde-renamed to snake_case). Disjoint from Claude
-# Code's vocabulary so the first-line check unambiguously discriminates.
-CODEX_OUTER_EVENT_TYPES: frozenset[str] = frozenset(
-    {"session_meta", "turn_context", "response_item", "event_msg", "compacted"}
-)
 
 # Event types we accept on the first non-empty line of a JSONL file when
 # classifying as Claude Code. Real Fleet data routinely starts with
