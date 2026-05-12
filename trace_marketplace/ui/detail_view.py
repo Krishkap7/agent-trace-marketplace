@@ -27,7 +27,12 @@ from urllib.parse import quote
 import streamlit as st
 
 from trace_marketplace.search.runner import NLSearchResult, run_find_similar
-from trace_marketplace.ui.components import render_header, render_step
+from trace_marketplace.ui.components import (
+    render_failure_events_timeline,
+    render_header,
+    render_recovered_recommendations_panel,
+    render_step,
+)
 from trace_marketplace.ui.queries import get_trace, list_traces_by_ids
 
 
@@ -156,6 +161,13 @@ def render(conn: sqlite3.Connection, trace_id: str) -> None:
         return
 
     render_header(row)
+    # Slice 10: events timeline + recoveries panel sit between the
+    # header and the live similarity search. They render conditionally
+    # (timeline only when there are events; recoveries only for failed
+    # traces with populated recommendations) so clean traces still see
+    # an uncluttered detail page.
+    render_failure_events_timeline(row.get("failure_events"))
+    render_recovered_recommendations_panel(row)
     _render_similar_panel(conn, trace_id)
     st.divider()
 

@@ -156,6 +156,99 @@ def test_list_traces_pagination_limit_caps_result_size(
     assert total == 6
 
 
+# ---------- slice 10 filters ----------
+
+
+def _seed_slice10_signal_rows(conn: sqlite3.Connection) -> None:
+    """Populate the slice-10 columns on the synthetic rows so the new
+    filter tests have known-good ground truth to assert against.
+
+    Operates only on the two synthetic rows so the rest of the fixtures
+    remain in their post-ingest state."""
+    # __test_success__ -> clean trace, empty events, succeeded=1.
+    conn.execute(
+        """
+        UPDATE traces
+           SET failure_events = '[]',
+               ultimately_succeeded = 1
+         WHERE id = '__test_success__'
+        """
+    )
+    # SWE-agent fixture is a real failure (target=False -> has_error=1).
+    # Add a recovered + unrecovered event so the unrecovered filter
+    # finds something and the recovered-summary panel has fuel.
+    swe_events_json = (
+        '[{"label":"loop","step_start":3,"step_end":7,'
+        '"recovered":true,"recovery_step":8,'
+        '"recovery_summary":"Used Read to verify the API surface."},'
+        '{"label":"gave_up","step_start":12,"step_end":13,'
+        '"recovered":false,"recovery_step":null,'
+        '"recovery_summary":null}]'
+    )
+    conn.execute(
+        """
+        UPDATE traces
+           SET failure_events = ?,
+               ultimately_succeeded = 0
+         WHERE source_format = 'swe_agent'
+        """,
+        (swe_events_json,),
+    )
+    conn.commit()
+
+
+def test_list_traces_has_unrecovered_failures_filter(
+    populated_db: sqlite3.Connection,
+) -> None:
+    _seed_slice10_signal_rows(populated_db)
+    rows, total = list_traces(populated_db, ListFilters(has_unrecovered_failures=True))
+    # Only the SWE-agent fixture has an unrecovered event.
+    assert total == 1
+    assert rows[0]["source_format"] == "swe_agent"
+
+
+def test_list_traces_clean_successes_only_filter(
+    populated_db: sqlite3.Connection,
+) -> None:
+    _seed_slice10_signal_rows(populated_db)
+    rows, total = list_traces(populated_db, ListFilters(clean_successes_only=True))
+    # Only __test_success__ has has_error=0 + ultimately_succeeded=1.
+    assert total == 1
+    assert rows[0]["id"] == "__test_success__"
+
+
+def test_list_traces_recovered_failures_only_filter(
+    populated_db: sqlite3.Connection,
+) -> None:
+    """Mark the SWE-agent row as a recovered failure (has_error=1 AND
+    ultimately_succeeded=1) and assert the filter finds exactly it."""
+    _seed_slice10_signal_rows(populated_db)
+    # Flip the SWE-agent row to "ultimately succeeded" so it counts as
+    # a recovered failure for this filter.
+    populated_db.execute(
+        "UPDATE traces SET ultimately_succeeded = 1 WHERE source_format = 'swe_agent'"
+    )
+    populated_db.commit()
+    rows, total = list_traces(populated_db, ListFilters(recovered_failures_only=True))
+    assert total == 1
+    assert rows[0]["source_format"] == "swe_agent"
+
+
+def test_list_traces_slice10_filters_compose_via_and(
+    populated_db: sqlite3.Connection,
+) -> None:
+    """Multiple slice-10 flags AND-combine. ``has_unrecovered=True``
+    plus ``clean_successes_only=True`` is an empty intersection by
+    construction; the filter set must produce zero rows rather than
+    raise or silently drop a clause."""
+    _seed_slice10_signal_rows(populated_db)
+    _, total = list_traces(
+        populated_db,
+        ListFilters(has_unrecovered_failures=True, clean_successes_only=True),
+    )
+    assert total == 0
+
+
 # ---------- get_trace ----------
 
 

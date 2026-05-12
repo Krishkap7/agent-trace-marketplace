@@ -48,7 +48,8 @@ CREATE TABLE IF NOT EXISTS traces (
     -- when the source format carries ground truth (SWE-agent ``target``).
     -- Slice 4 fills this for the unlabelled formats from rule-based
     -- signals; benchmark labels are never overwritten (COALESCE keeps
-    -- them).
+    -- them). NOTE: this is *process* failure (any wall hit). Slice 10
+    -- adds the separate ``ultimately_succeeded`` column for outcome.
     has_error                INTEGER,
     -- Slice 4: structural signal JSON (e.g. ``{"loop": true, ...}``)
     -- plus the LLM-judge label + one-sentence reasoning.
@@ -56,7 +57,28 @@ CREATE TABLE IF NOT EXISTS traces (
     failure_label            TEXT,
     failure_label_reasoning  TEXT,
     -- Reserved for slice 5 (embeddings + semantic search).
-    embedding_id             TEXT
+    embedding_id             TEXT,
+    -- Slice 10: multi-event failure timeline produced by the Opus 4.7
+    -- extractor (``enrich/failure_events.py``). JSON list of
+    -- ``FailureEvent`` objects, possibly empty. The single-label
+    -- ``failure_label`` column is overwritten from this list (most
+    -- severe unrecovered event) once events have been extracted.
+    failure_events           TEXT,
+    -- Slice 10: pre-computed "recovered recommendations" panel. JSON
+    -- list of ``{trace_id, similarity, source_format, agent_name,
+    -- recoveries:[...]}``. Populated for ``has_error=1`` traces only.
+    recovered_recommendations TEXT,
+    -- Slice 10: provenance for ``failure_label``. One of
+    -- ``'swe_agent_target'``, ``'sonnet_judge'``,
+    -- ``'opus_events_derived'``. Backfilled from existing labels +
+    -- updated by the events extractor.
+    failure_label_source     TEXT,
+    -- Slice 10: outcome signal, complement to the process signal in
+    -- ``has_error``. ``1`` = trace ended successfully; ``0`` = trace
+    -- did not ultimately succeed; ``NULL`` = unknown. Backfilled from
+    -- SWE-agent ``target`` for benchmark rows; set by the events
+    -- extractor for everything else.
+    ultimately_succeeded     INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS trace_embeddings (
@@ -136,12 +158,153 @@ def _migrate_add_embeddings_table(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_add_event_columns(conn: sqlite3.Connection) -> None:
+    """Idempotently add the slice 10 columns to an existing DB.
+
+    Adds four columns (``failure_events``, ``recovered_recommendations``,
+    ``failure_label_source``, ``ultimately_succeeded``) and backfills the
+    two columns that have known values today:
+
+    * ``failure_label_source`` -- ``'swe_agent_target'`` for SWE-agent
+      rows that already have a ``failure_label`` (ground truth from
+      benchmark ``target``), ``'sonnet_judge'`` for everything else
+      with a populated label.
+    * ``ultimately_succeeded`` -- read ``target`` out of each SWE-agent
+      ``raw_blob`` and store ``int(target)``. We also cross-check
+      against ``has_error``: the adapter at ``adapters/swe_agent.py``
+      derives ``has_error = int(not target)``, so for any SWE-agent
+      row ``ultimately_succeeded == 1 - has_error`` MUST hold. If it
+      doesn't, the adapter is broken and we want a loud failure, not
+      a silent log line -- raise ``RuntimeError`` so the migration
+      aborts before any downstream code runs against bad data.
+
+    The remaining columns (``failure_events``,
+    ``recovered_recommendations``) stay NULL; the Opus extractor and
+    the recommendations script in slice 10 populate them.
+    """
+    cur = conn.execute("PRAGMA table_info(traces)")
+    existing = {row[1] for row in cur.fetchall()}
+    if not existing:
+        return
+    if "failure_events" not in existing:
+        conn.execute("ALTER TABLE traces ADD COLUMN failure_events TEXT")
+    if "recovered_recommendations" not in existing:
+        conn.execute("ALTER TABLE traces ADD COLUMN recovered_recommendations TEXT")
+    if "failure_label_source" not in existing:
+        conn.execute("ALTER TABLE traces ADD COLUMN failure_label_source TEXT")
+    if "ultimately_succeeded" not in existing:
+        conn.execute("ALTER TABLE traces ADD COLUMN ultimately_succeeded INTEGER")
+    conn.commit()
+
+    _backfill_failure_label_source(conn)
+    _backfill_ultimately_succeeded_swe_agent(conn)
+
+
+def _backfill_failure_label_source(conn: sqlite3.Connection) -> None:
+    """Populate ``failure_label_source`` for rows where it's still NULL.
+
+    Provenance rule:
+    * SWE-agent rows with a populated ``failure_label`` -> the label
+      came from the benchmark's ``target`` field (slice 2.5).
+    * Every other row with a populated ``failure_label`` -> the label
+      came from the slice 4 Sonnet judge.
+    * Rows with NULL ``failure_label`` stay NULL.
+
+    Idempotent: only touches rows whose ``failure_label_source`` is
+    NULL, so re-running ``init_schema`` against a DB that already had
+    this migration applied does nothing.
+    """
+    conn.execute(
+        """
+        UPDATE traces
+           SET failure_label_source = 'swe_agent_target'
+         WHERE source_format = 'swe_agent'
+           AND failure_label IS NOT NULL
+           AND failure_label_source IS NULL
+        """
+    )
+    conn.execute(
+        """
+        UPDATE traces
+           SET failure_label_source = 'sonnet_judge'
+         WHERE failure_label IS NOT NULL
+           AND failure_label_source IS NULL
+        """
+    )
+    conn.commit()
+
+
+def _backfill_ultimately_succeeded_swe_agent(conn: sqlite3.Connection) -> None:
+    """Populate ``ultimately_succeeded`` for SWE-agent rows from ``target``.
+
+    Per the slice 10 plan we read ``target`` out of the raw_blob rather
+    than reusing ``has_error`` directly, so the column is grounded in
+    the benchmark's ground truth instead of an intermediate derivation.
+    We then assert ``ultimately_succeeded == 1 - has_error`` -- this
+    invariant SHOULD hold because ``adapters/swe_agent.py`` line 119-121
+    sets ``trajectory.extra["resolved"] = target`` and the pipeline at
+    ``ingest/pipeline.py`` line 52-69 sets ``has_error = int(not
+    resolved)`` -- so any mismatch indicates the adapter is broken and
+    we abort the migration loudly rather than persisting bad data.
+
+    Idempotent: only touches rows whose ``ultimately_succeeded`` is
+    still NULL.
+    """
+    cur = conn.execute(
+        """
+        SELECT id, raw_blob, has_error
+          FROM traces
+         WHERE source_format = 'swe_agent'
+           AND ultimately_succeeded IS NULL
+        """
+    )
+    pending: list[tuple[int, str]] = []
+    for row in cur.fetchall():
+        trace_id = row["id"]
+        try:
+            blob = json.loads(row["raw_blob"])
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise RuntimeError(
+                f"SWE-agent row {trace_id!r} has unparseable raw_blob "
+                f"during ultimately_succeeded backfill: {exc}"
+            ) from exc
+        if not isinstance(blob, dict):
+            raise RuntimeError(
+                f"SWE-agent row {trace_id!r}: raw_blob is not a JSON object"
+            )
+        target = blob.get("target")
+        if not isinstance(target, bool):
+            raise RuntimeError(
+                f"SWE-agent row {trace_id!r}: ``target`` is not a bool "
+                f"(got {type(target).__name__!r}={target!r})"
+            )
+        succeeded = int(target)
+        has_error = row["has_error"]
+        if has_error is not None and succeeded != (1 - int(has_error)):
+            raise RuntimeError(
+                f"SWE-agent adapter invariant violated for trace {trace_id!r}: "
+                f"target={target!r} implies ultimately_succeeded={succeeded}, "
+                f"but has_error={has_error!r} implies "
+                f"ultimately_succeeded={1 - int(has_error)}. "
+                f"Check adapters/swe_agent.py + ingest/pipeline.py for drift."
+            )
+        pending.append((succeeded, trace_id))
+    if not pending:
+        return
+    conn.executemany(
+        "UPDATE traces SET ultimately_succeeded = ? WHERE id = ?",
+        pending,
+    )
+    conn.commit()
+
+
 def init_schema(conn: sqlite3.Connection) -> None:
     """Create the ``traces`` table if it doesn't exist, then run any
     idempotent column-addition migrations against an existing DB."""
     conn.executescript(SCHEMA_SQL)
     _migrate_add_failure_columns(conn)
     _migrate_add_embeddings_table(conn)
+    _migrate_add_event_columns(conn)
     conn.commit()
 
 
@@ -237,6 +400,9 @@ __all__ = [
     "insert_trace",
     "_migrate_add_failure_columns",
     "_migrate_add_embeddings_table",
+    "_migrate_add_event_columns",
+    "_backfill_failure_label_source",
+    "_backfill_ultimately_succeeded_swe_agent",
 ]
 
 
