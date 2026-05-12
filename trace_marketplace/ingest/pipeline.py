@@ -13,9 +13,9 @@ accepting user uploads.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import sqlite3
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -67,14 +67,23 @@ def _derive_has_error(trajectory: Trajectory) -> int | None:
     return None
 
 
-def _trace_id_for(trajectory: Trajectory | None, path: Path) -> str:
+def _trace_id_for(
+    trajectory: Trajectory | None, path: Path, raw_text: str
+) -> str:
     """Pick a stable primary key for the ``traces`` row.
 
-    Preference order:
+    Preference order, all deterministic:
     1. ATIF ``trajectory_id`` (v1.7+, document-scoped)
     2. ATIF ``session_id`` (v1.2+, run-scoped, fine for our corpora)
     3. The file's stem (e.g. ``claude-cmux-docs-2026-05-05``)
-    4. A random uuid4 (only if even the path is empty)
+    4. ``sha256:<hex>`` over the raw bytes -- content-addressable, so
+       the same file always lands on the same row no matter where it
+       lives on disk and no matter what its name is.
+
+    The previous version fell back to ``uuid.uuid4()``, which broke
+    the idempotency guarantee documented on ``ingest_file`` and
+    ``insert_trace``: re-running ingest on a path with empty stem
+    would silently duplicate the row. Caught by Cursor bugbot on PR #1.
     """
     if trajectory is not None:
         for candidate in (
@@ -85,7 +94,8 @@ def _trace_id_for(trajectory: Trajectory | None, path: Path) -> str:
                 return candidate
     if path.stem:
         return path.stem
-    return str(uuid.uuid4())
+    digest = hashlib.sha256(raw_text.encode("utf-8", errors="replace")).hexdigest()
+    return f"sha256:{digest[:32]}"
 
 
 def ingest_file(path: Path, conn: sqlite3.Connection) -> IngestResult:
@@ -132,7 +142,7 @@ def ingest_file(path: Path, conn: sqlite3.Connection) -> IngestResult:
         num_tool_calls = None
         has_error = None
 
-    trace_id = _trace_id_for(trajectory, path)
+    trace_id = _trace_id_for(trajectory, path, raw_text)
 
     insert_trace(
         conn,
