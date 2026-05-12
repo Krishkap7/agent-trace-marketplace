@@ -97,6 +97,45 @@ _FOOTER_NOTE: str = (
     "`WHERE failure_label IS NULL` gate."
 )
 
+_SAFE_FALLBACK_FILENAME: str = "upload.bin"
+"""Last-resort filename used when the supplied name sanitises down to
+something empty or otherwise unusable (e.g. ``..`` / ``.`` / pure
+slashes). ``.bin`` keeps :func:`detect_format` on the unknown branch
+rather than mis-classifying a sanitised payload."""
+
+
+def _sanitise_upload_filename(raw: str) -> str:
+    """Strip directory components and reject path-traversal payloads.
+
+    Both upload entry points feed untrusted strings into ``tmp_dir /
+    filename``: the paste tab pulls the filename from a free-text
+    ``st.text_input``, and the drag-drop tab uses
+    ``UploadedFile.name`` which is set by the browser / HTTP client
+    and is therefore equally attacker-controllable. Without this
+    sanitiser a filename like ``../../etc/cron.d/evil`` resolves
+    OUTSIDE ``tmp_dir`` and ``write_bytes`` would clobber an arbitrary
+    path on the host. (Flagged by Cursor bugbot on PR #8 commit
+    bcea7cc.)
+
+    Strategy:
+
+    1. ``Path(raw).name`` -- drops every directory component, including
+       chained ``../`` segments and absolute-path prefixes. Cross-
+       platform: on POSIX the separator is ``/``; on Windows ``Path``
+       handles both ``/`` and ``\\``. Streamlit Cloud is Linux so the
+       POSIX behaviour is what runs in production.
+    2. Strip whitespace and reject the empty string, ``.``, and ``..``
+       -- ``Path("..").name`` returns ``".."`` which is a no-op against
+       traversal but is still meaningless as a filename.
+    3. Fall back to :data:`_SAFE_FALLBACK_FILENAME` when sanitisation
+       leaves nothing usable; the upload still goes through and lands
+       under that filename in the tempdir.
+    """
+    basename = Path(raw or "").name.strip()
+    if basename in {"", ".", ".."}:
+        return _SAFE_FALLBACK_FILENAME
+    return basename
+
 
 @dataclass(frozen=True)
 class _UploadOutcome:
@@ -117,26 +156,34 @@ class _UploadOutcome:
 def _process_upload(
     conn: sqlite3.Connection, tmp_dir: Path, filename: str, payload: bytes
 ) -> _UploadOutcome:
-    """Stage ``payload`` to ``tmp_dir/filename``, ingest, persist signals.
+    """Stage ``payload`` to ``tmp_dir/<safe-name>``, ingest, persist signals.
 
     Single try/except around each external step so we surface a useful
     error message to the user instead of crashing the page. The caller
     iterates over multiple files; isolating failures per file is what
     keeps a multi-file submission's good files from being lost when one
     bad file blows up.
+
+    Filename is sanitised through :func:`_sanitise_upload_filename`
+    before the tempdir join so a hostile path component
+    (``../../etc/cron.d/evil``) can't escape the tempdir. We surface
+    the *sanitised* name in the returned outcome so the per-file
+    result block tells the user exactly what was written, not the
+    payload they typed -- there's no point hiding sanitisation.
     """
-    tmp_path = tmp_dir / filename
+    safe_name = _sanitise_upload_filename(filename)
+    tmp_path = tmp_dir / safe_name
     try:
         tmp_path.write_bytes(payload)
     except OSError as exc:
-        return _UploadOutcome(filename, None, None, f"Could not stage file: {exc}")
+        return _UploadOutcome(safe_name, None, None, f"Could not stage file: {exc}")
 
     try:
         ingest_result = ingest_file(tmp_path, conn)
     except Exception as exc:  # adapters can raise anything; be defensive
-        log.exception("Ingest failed for %s", filename)
+        log.exception("Ingest failed for %s", safe_name)
         return _UploadOutcome(
-            filename, None, None, f"Ingest failed: {type(exc).__name__}: {exc}"
+            safe_name, None, None, f"Ingest failed: {type(exc).__name__}: {exc}"
         )
 
     signals: dict[str, bool] | None = None
@@ -159,12 +206,12 @@ def _process_upload(
             # keep the upload result green for the user.
             log.exception(
                 "Rule pass failed for %s (%s); trace is still ingested",
-                filename,
+                safe_name,
                 ingest_result.trace_id,
             )
 
     conn.commit()
-    return _UploadOutcome(filename, ingest_result, signals, None)
+    return _UploadOutcome(safe_name, ingest_result, signals, None)
 
 
 def _format_signals(signals: dict[str, bool] | None) -> str:

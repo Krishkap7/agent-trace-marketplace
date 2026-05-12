@@ -32,9 +32,15 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from trace_marketplace.enrich.failure_rules import persist_signals_for_trace
 from trace_marketplace.ingest.pipeline import ingest_file
 from trace_marketplace.storage.db import connect, count_traces, init_schema
+from trace_marketplace.ui.upload_view import (
+    _SAFE_FALLBACK_FILENAME,
+    _sanitise_upload_filename,
+)
 
 _CLAUDE_CODE_FIXTURE = Path("tests/fixtures/claude_code_minimal.jsonl")
 
@@ -121,6 +127,61 @@ def test_upload_pipeline_handles_unknown_format_as_raw_blob(tmp_path: Path) -> N
     # And the column stays NULL because the helper short-circuits before
     # the UPDATE ever runs.
     assert row["failure_signals"] is None
+
+
+# --------------------------------------------------------------------------- #
+# Security regression: path traversal in filename (bugbot PR #8).
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        # Plain basenames pass through unchanged.
+        ("session.jsonl", "session.jsonl"),
+        ("my-trace.cursor.json", "my-trace.cursor.json"),
+        ("uploaded.json  ", "uploaded.json"),  # trailing whitespace stripped
+        # POSIX traversal -- the attack vector flagged by bugbot.
+        ("../../etc/passwd", "passwd"),
+        ("../../../etc/cron.d/evil", "evil"),
+        ("./hidden/../traversal.json", "traversal.json"),
+        # Absolute paths -- collapse to the leaf.
+        ("/etc/shadow", "shadow"),
+        ("/var/log/system.log", "system.log"),
+        # Pathological inputs that sanitise to nothing usable fall back
+        # to the safe default rather than passing an empty string to
+        # ``Path / ""`` (which would resolve to ``tmp_dir`` itself, a
+        # directory you can't write_bytes to).
+        ("", _SAFE_FALLBACK_FILENAME),
+        ("..", _SAFE_FALLBACK_FILENAME),
+        (".", _SAFE_FALLBACK_FILENAME),
+        ("   ", _SAFE_FALLBACK_FILENAME),
+    ],
+)
+def test_sanitise_upload_filename_rejects_traversal(raw: str, expected: str) -> None:
+    """The sanitiser must collapse every form of directory traversal
+    down to a plain basename so ``tmp_dir / sanitised`` can't escape
+    the tempdir."""
+    assert _sanitise_upload_filename(raw) == expected
+
+
+def test_sanitised_filename_stays_inside_tmpdir(tmp_path: Path) -> None:
+    """End-to-end safety property: even when the user supplies an
+    overtly hostile filename, the resolved write path is a child of
+    ``tmp_path``. If this ever regresses, the upload view becomes an
+    arbitrary-write primitive on the host."""
+    hostile_inputs = [
+        "../../etc/passwd",
+        "../../../../etc/cron.d/evil",
+        "/etc/shadow",
+        "/var/log/system.log",
+    ]
+    for hostile in hostile_inputs:
+        safe = _sanitise_upload_filename(hostile)
+        resolved = (tmp_path / safe).resolve()
+        # ``relative_to`` raises ValueError if ``resolved`` isn't a
+        # descendant of ``tmp_path`` -- exactly the property we want.
+        resolved.relative_to(tmp_path.resolve())
 
 
 def test_upload_pipeline_is_idempotent_across_repeat_uploads(tmp_path: Path) -> None:
