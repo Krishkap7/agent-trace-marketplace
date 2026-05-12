@@ -189,6 +189,13 @@ def render_header(trace_row: dict[str, Any]) -> None:
         failure_bits.append(f"Failure label: `{failure_label}`")
     st.markdown("  \n".join(failure_bits))
 
+    # Slice 4 LLM-judge reasoning. Rendered as a caption rather than a
+    # quote block so it visually sits *underneath* the label badge and
+    # doesn't compete with the conversation thread below.
+    reasoning = trace_row.get("failure_label_reasoning")
+    if isinstance(reasoning, str) and reasoning.strip():
+        st.caption(f"_Judge:_ {reasoning.strip()}")
+
 
 def render_filters_summary(counts: dict[str, int]) -> None:
     """Sidebar header that tells the user how many rows live in the DB.
