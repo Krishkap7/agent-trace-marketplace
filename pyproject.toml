@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Failure-mode search engine for coding-agent traces."
 requires-python = ">=3.12"
 dependencies = [
+    "anthropic>=0.40.0",
     "harbor>=0.6.6",
     "huggingface-hub>=0.24.0",
     "pyarrow>=15.0.0",
