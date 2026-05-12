@@ -1,0 +1,86 @@
+{
+  "session_id": "sess-synth-cursor-01-e82b1ff0",
+  "cursor_version": "0.45.0",
+  "workspace_path": "/Users/synth/projects/fictional",
+  "model": "claude-3.5-sonnet",
+  "synthetic": true,
+  "messages": [
+    {
+      "role": "user",
+      "content": "Add a `format_phone` helper that turns 10-digit strings into (xxx) xxx-xxxx.",
+      "timestamp": "2026-05-01T13:00:03Z"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "I'll read `helpers.py` first to see what's already there."
+        }
+      ],
+      "timestamp": "2026-05-01T13:01:08Z",
+      "tool_calls": [
+        {
+          "id": "tc-01-95daa1",
+          "name": "read_file",
+          "arguments": {
+            "path": "helpers.py"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": "",
+      "timestamp": "2026-05-01T13:02:40Z",
+      "tool_results": [
+        {
+          "tool_call_id": "tc-01-95daa1",
+          "content": "def format_email(addr):\n    return addr.lower().strip()\n"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Adding the helper after `format_email`."
+        }
+      ],
+      "timestamp": "2026-05-01T13:03:15Z",
+      "tool_calls": [
+        {
+          "id": "tc-01-b38351",
+          "name": "edit_file",
+          "arguments": {
+            "path": "helpers.py",
+            "find": "def format_email(addr):\n    return addr.lower().strip()\n",
+            "replace": "def format_email(addr):\n    return addr.lower().strip()\n\n\ndef format_phone(s: str) -> str:\n    digits = ''.join(c for c in s if c.isdigit())\n    return f\"({digits[0:3]}) {digits[3:6]}-{digits[6:10]}\"\n"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": "",
+      "timestamp": "2026-05-01T13:04:14Z",
+      "tool_results": [
+        {
+          "tool_call_id": "tc-01-b38351",
+          "content": "edit applied successfully"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Done -- `format_phone('5551234567')` now returns `'(555) 123-4567'`."
+        }
+      ],
+      "timestamp": "2026-05-01T13:05:05Z"
+    }
+  ]
+}

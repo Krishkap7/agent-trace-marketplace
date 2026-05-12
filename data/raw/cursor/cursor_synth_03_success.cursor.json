@@ -1,0 +1,54 @@
+{
+  "session_id": "sess-synth-cursor-03-7a0a4397",
+  "cursor_version": "0.45.0",
+  "workspace_path": "/Users/synth/projects/fictional",
+  "model": "gpt-4o",
+  "synthetic": true,
+  "messages": [
+    {
+      "role": "user",
+      "content": "Run the tests and show me the output.",
+      "timestamp": "2026-05-01T13:00:54Z"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "Running pytest."
+        }
+      ],
+      "timestamp": "2026-05-01T13:01:54Z",
+      "tool_calls": [
+        {
+          "id": "tc-03-c20615",
+          "name": "run_terminal_cmd",
+          "arguments": {
+            "command": "pytest -q"
+          }
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": "",
+      "timestamp": "2026-05-01T13:02:08Z",
+      "tool_results": [
+        {
+          "tool_call_id": "tc-03-c20615",
+          "content": "..............\n14 passed in 0.61s\n"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {
+          "type": "text",
+          "text": "All 14 tests pass."
+        }
+      ],
+      "timestamp": "2026-05-01T13:03:50Z"
+    }
+  ]
+}

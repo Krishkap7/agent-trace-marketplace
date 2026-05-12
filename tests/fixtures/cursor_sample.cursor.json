@@ -1,0 +1,65 @@
+{
+  "session_id": "sess-fixture-cursor-1",
+  "cursor_version": "0.45.0",
+  "workspace_path": "/Users/me/projects/fictional",
+  "model": "claude-3.5-sonnet",
+  "synthetic": true,
+  "messages": [
+    {
+      "role": "user",
+      "content": "Find a bug in foo.py and fix it.",
+      "timestamp": "2026-05-01T12:00:00Z"
+    },
+    {
+      "role": "assistant",
+      "content": [
+        {"type": "text", "text": "I'll read foo.py first to see what's there."}
+      ],
+      "timestamp": "2026-05-01T12:00:01Z",
+      "tool_calls": [
+        {
+          "id": "tc-1",
+          "name": "read_file",
+          "arguments": {"path": "foo.py"}
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": "",
+      "tool_results": [
+        {
+          "tool_call_id": "tc-1",
+          "content": "def add(a, b):\n    return a - b\n"
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": "Found it -- `add` returns `a - b`. Patching to `a + b`.",
+      "timestamp": "2026-05-01T12:00:02Z",
+      "tool_calls": [
+        {
+          "id": "tc-2",
+          "name": "edit_file",
+          "arguments": {"path": "foo.py", "find": "a - b", "replace": "a + b"}
+        }
+      ]
+    },
+    {
+      "role": "user",
+      "content": "",
+      "tool_results": [
+        {
+          "tool_call_id": "tc-2",
+          "content": [{"type": "text", "text": "edit applied successfully"}]
+        }
+      ]
+    },
+    {
+      "role": "assistant",
+      "content": "Fixed. The bug was that `add` used subtraction.",
+      "timestamp": "2026-05-01T12:00:03Z"
+    }
+  ]
+}

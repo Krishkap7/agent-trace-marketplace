@@ -13,11 +13,13 @@ accepting user uploads.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import sqlite3
-import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from harbor.models.trajectories import Trajectory
 from trace_marketplace.adapters import ADAPTERS
@@ -67,14 +69,100 @@ def _derive_has_error(trajectory: Trajectory) -> int | None:
     return None
 
 
-def _trace_id_for(trajectory: Trajectory | None, path: Path) -> str:
+def _identity_from_dict(d: dict[str, Any]) -> str | None:
+    """Pull a session/trajectory identity out of one parsed JSON dict.
+
+    Probes every known identity field across the 5 supported formats:
+
+    * snake_case top level: ``trajectory_id`` / ``session_id`` /
+      ``instance_id``  (ATIF, Cursor, SWE-agent body)
+    * camelCase top level: ``sessionId``       (Claude Code event line)
+    * nested              : ``payload.id`` when ``type == "session_meta"``
+                            (Codex event line)
+    """
+    for key in ("trajectory_id", "session_id", "instance_id", "sessionId"):
+        value = d.get(key)
+        if isinstance(value, str) and value:
+            return value
+    if d.get("type") == "session_meta":
+        payload = d.get("payload")
+        if isinstance(payload, dict):
+            sid = payload.get("id")
+            if isinstance(sid, str) and sid:
+                return sid
+    return None
+
+
+def _extract_raw_identity(raw_text: str) -> str | None:
+    """Best-effort identity peek for files where Pydantic validation
+    failed but the raw bytes still carry a session/trajectory id.
+
+    Without this, every failed validation falls through to
+    ``path.stem`` -- and because ATIF benchmark files are uniformly
+    named ``trajectory.json``, every failure would collide on the
+    single id ``"trajectory"`` and silently clobber the previous row
+    via ``INSERT OR REPLACE``. (Caught by Cursor bugbot on PR #2.)
+
+    Tries two interpretations of the raw text:
+    1. The whole document as a JSON object  (handles ATIF / Cursor /
+       SWE-agent / Codex-or-Claude-Code-with-only-one-event).
+    2. Its first non-empty line as a JSON object  (handles real JSONL
+       streams where the whole document isn't a single JSON value).
+
+    Returns the first identity match found across both interpretations,
+    or ``None``. Caller then falls back to ``path.stem`` then content
+    hash.
+    """
+    stripped = raw_text.strip()
+    if not stripped:
+        return None
+    try:
+        whole = json.loads(stripped)
+    except json.JSONDecodeError:
+        whole = None
+    if isinstance(whole, dict):
+        identity = _identity_from_dict(whole)
+        if identity is not None:
+            return identity
+    first_line = next(
+        (line.strip() for line in stripped.splitlines() if line.strip()),
+        None,
+    )
+    if first_line is None or first_line == stripped:
+        # Either no lines, or the whole document was already a single
+        # line we just probed above -- no second interpretation possible.
+        return None
+    try:
+        event = json.loads(first_line)
+    except json.JSONDecodeError:
+        return None
+    if isinstance(event, dict):
+        return _identity_from_dict(event)
+    return None
+
+
+def _trace_id_for(
+    trajectory: Trajectory | None, path: Path, raw_text: str
+) -> str:
     """Pick a stable primary key for the ``traces`` row.
 
-    Preference order:
-    1. ATIF ``trajectory_id`` (v1.7+, document-scoped)
-    2. ATIF ``session_id`` (v1.2+, run-scoped, fine for our corpora)
-    3. The file's stem (e.g. ``claude-cmux-docs-2026-05-05``)
-    4. A random uuid4 (only if even the path is empty)
+    Preference order, all deterministic:
+    1. ATIF ``trajectory_id``   (v1.7+, validated)
+    2. ATIF ``session_id``      (v1.2+, validated, fine for our corpora)
+    3. Raw-text identity peek   (validation-failure path; covers all 5
+       formats' on-the-wire identity fields)
+    4. ``path.stem``            (e.g. ``claude-cmux-docs-2026-05-05``)
+    5. ``sha256:<hex>``         over the raw bytes -- content-addressable
+       leaf that guarantees the documented idempotency contract.
+
+    Two earlier bugs the layering closes:
+
+    * uuid4 leaf (caught by bugbot on PR #1) broke idempotency for
+      empty-stem paths; now we hash the bytes.
+    * path.stem fallback (caught by bugbot on PR #2) collided every
+      failed-validation ATIF row onto the single id ``"trajectory"``
+      because the benchmark corpus uniformly uses that filename. The
+      raw-text identity peek above closes that gap.
     """
     if trajectory is not None:
         for candidate in (
@@ -83,9 +171,13 @@ def _trace_id_for(trajectory: Trajectory | None, path: Path) -> str:
         ):
             if isinstance(candidate, str) and candidate:
                 return candidate
+    raw_identity = _extract_raw_identity(raw_text)
+    if raw_identity is not None:
+        return raw_identity
     if path.stem:
         return path.stem
-    return str(uuid.uuid4())
+    digest = hashlib.sha256(raw_text.encode("utf-8", errors="replace")).hexdigest()
+    return f"sha256:{digest[:32]}"
 
 
 def ingest_file(path: Path, conn: sqlite3.Connection) -> IngestResult:
@@ -132,7 +224,7 @@ def ingest_file(path: Path, conn: sqlite3.Connection) -> IngestResult:
         num_tool_calls = None
         has_error = None
 
-    trace_id = _trace_id_for(trajectory, path)
+    trace_id = _trace_id_for(trajectory, path, raw_text)
 
     insert_trace(
         conn,

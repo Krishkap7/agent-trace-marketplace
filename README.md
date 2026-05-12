@@ -4,7 +4,9 @@ A failure-mode search engine for coding-agent traces. See [trace-marketplace-con
 
 ## Status
 
-**Slice 2.5 (current):** SWE-agent HuggingFace adapter. Bulk-ingests a stratified 500-row sample (250 success / 250 failure) from `nebius/SWE-agent-trajectories` and wires the `has_error` column generically off `trajectory.extra["resolved"]`.
+**Slice 2.6 (current):** Codex (OpenAI `~/.codex/sessions/*.jsonl` rollouts) and Cursor (project-defined v1 export envelope) adapters. Both ship with deterministic synthetic-fixture generators (4 success / 3 failure / 2 short / 1 long per format) plus 6 named ground-truth failure modes (`hallucinated_api`, `infinite_retry_loop`, `ignored_test_failure`, `broke_working_code`, `wrong_file_edited`, `premature_conclusion`) propagated into `trajectory.extra.synthetic_failure_mode` for downstream search evaluation.
+
+**Slice 2.5:** SWE-agent HuggingFace adapter. Bulk-ingests a stratified 500-row sample (250 success / 250 failure) from `nebius/SWE-agent-trajectories` and wires the `has_error` column generically off `trajectory.extra["resolved"]`.
 
 **Slice 2:** Claude Code JSONL → ATIF adapter, modular ingest pipeline (detect → adapt → redact → store) covering both native ATIF and Claude Code sessions.
 
@@ -14,8 +16,9 @@ A failure-mode search engine for coding-agent traces. See [trace-marketplace-con
 
 The marketplace pulls from two distinct sources, each filling a different gap:
 
-* **Real-user traces** (Claude Code JSONL, future Cursor exports): a long, messy, high-fidelity record of what an agent actually did on someone's laptop. Step counts in the thousands, model thinking blocks intact, no ground-truth labels. This is the *target* of the failure-mode search engine — what users will actually upload.
+* **Real-user traces** (Claude Code JSONL, Cursor v1 envelope, Codex rollout JSONL): a long, messy, high-fidelity record of what an agent actually did on someone's laptop. Step counts in the thousands, model thinking blocks intact, no ground-truth labels. This is the *target* of the failure-mode search engine — what users will actually upload.
 * **Benchmark traces** (ATIF MCP, SWE-agent): comparatively short, structured, and crucially carry a *labelled outcome* (success/failure against held-out tests). This is the *evaluation set* — slice 3's failure-detection rules and judges get calibrated against `has_error` here before being applied to the unlabelled real-user corpus.
+* **Synthetic failure-mode fixtures** (Codex / Cursor `_failure_*` files): a small set of deterministically generated traces with `trajectory.extra.synthetic_failure_mode` tagging the *kind* of failure (hallucinated API, ignored test failure, edited the wrong file, …). Bridges the gap between unlabelled real-user data and binary success/failure benchmark labels — gives the search engine ground-truth named-mode targets to evaluate against.
 
 ## Setup
 
@@ -31,21 +34,27 @@ This creates `.venv/` with Python 3.12 and installs `harbor` (ATIF Pydantic mode
 
 ```bash
 uv run python scripts/download_corpus.py        # pulls ATIF trajectory.json files into data/raw/
-uv run python scripts/ingest_atif.py            # ingests 5 ATIF traces into data/marketplace.db
-uv run python scripts/ingest_claude_code.py     # ingests *.jsonl from data/raw/claude_code/
+uv run python scripts/ingest_atif.py            # 5 ATIF traces      → data/marketplace.db
+uv run python scripts/ingest_claude_code.py     # *.jsonl from data/raw/claude_code/
 
 # SWE-agent corpus (~85 MB parquet pull, ~30 s):
 HF_HOME="$PWD/.cache/huggingface" uv run python scripts/download_swe_agent.py   # 250 success + 250 failure
 uv run python scripts/ingest_swe_agent.py                                       # → 500 rows into the DB
 
+# Codex + Cursor (synthetic fixtures, ~0.5 s):
+uv run python scripts/generate_synthetic_codex.py     # 10 *.jsonl into data/raw/codex/
+uv run python scripts/generate_synthetic_cursor.py    # 10 *.cursor.json into data/raw/cursor/
+uv run python scripts/ingest_codex.py                 # 10 codex rows
+uv run python scripts/ingest_cursor.py                # 10 cursor rows
+
 uv run python scripts/verify.py                 # SELECT + per-format / per-has_error breakdown
-uv run python scripts/breakdown.py              # success/failure split by source_format and model
+uv run python scripts/breakdown.py              # success/failure + synthetic failure-mode counts
 uv run python scripts/inspect_trace.py <id>     # detailed view of one trace
 ```
 
-End-to-end output should show 5 ATIF + N Claude Code + 500 SWE-agent rows, all with non-NULL `raw_blob` and `atif` columns. SWE-agent rows additionally carry `has_error ∈ {0, 1}` (250 each); the other formats stay `has_error=NULL` until slice 3 lands the failure-detection pass.
+End-to-end output should show 5 ATIF + 2 Claude Code + 500 SWE-agent + 10 Codex + 10 Cursor = **527 rows**, all with non-NULL `raw_blob` and `atif` columns. SWE-agent rows additionally carry `has_error ∈ {0, 1}` (250 each); the other formats stay `has_error=NULL` until slice 3 lands the failure-detection pass. The 3 `*_failure_*.jsonl` Codex files and 3 `cursor_synth_*_failure.cursor.json` files carry a `synthetic_failure_mode` ground-truth label inside `atif.extra` (queryable via `json_extract(atif, '$.extra.synthetic_failure_mode')`).
 
-For Claude Code ingest, drop session JSONL files into `data/raw/claude_code/` (these come from `~/.claude/projects/<dir>/<uuid>.jsonl` on a real install). The directory is gitignored so test sessions never end up committed.
+For Claude Code ingest, drop session JSONL files into `data/raw/claude_code/` (these come from `~/.claude/projects/<dir>/<uuid>.jsonl` on a real install). Codex sessions live under `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`; point `scripts/ingest_codex.py --raw-dir` at that directory to ingest real Codex rollouts. Cursor v1 envelope files use the `*.cursor.json` extension and follow the spec in `trace_marketplace/adapters/cursor.py`. All three real-data directories are gitignored.
 
 ## Tests
 
@@ -64,32 +73,44 @@ trace_marketplace/
     atif.py                # passthrough + v1.2→v1.7 schema normalization
     claude_code.py         # JSONL → ATIF (walks message.content blocks)
     swe_agent.py           # SWE-agent HF row → ATIF (system_prompt + text)
-    cursor.py              # stub (see module docstring for v2 plan)
+    codex.py               # ~/.codex/sessions/*.jsonl rollouts → ATIF
+    cursor.py              # Cursor v1 export envelope → ATIF
   ingest/
-    detect.py              # cheap format sniffer
+    detect.py              # cheap format sniffer (5 formats)
     pipeline.py            # detect → adapt → redact → insert (+ has_error)
   storage/
     db.py                  # SQLite schema + insert helper
 scripts/
-  download_corpus.py       # HuggingFace → data/raw/
-  download_swe_agent.py    # nebius/SWE-agent-trajectories parquet → data/raw/swe_agent/
-  ingest_atif.py           # data/raw/<agent>/trajectory.json → DB
-  ingest_claude_code.py    # data/raw/claude_code/*.jsonl → DB
-  ingest_swe_agent.py      # data/raw/swe_agent/*.json → DB
-  verify.py                # SELECT + pretty-print + format/has_error breakdown
-  breakdown.py             # success/failure stats by source_format and model
-  inspect_trace.py         # one-trace detail view
-  explore_swe_agent.py     # one-shot Step-0 inspection (uncommitted scratch)
+  download_corpus.py            # ATIF MCP traces → data/raw/<agent>/
+  download_swe_agent.py         # nebius/SWE-agent-trajectories parquet → data/raw/swe_agent/
+  generate_synthetic_codex.py   # 10 synthetic Codex rollouts → data/raw/codex/
+  generate_synthetic_cursor.py  # 10 synthetic Cursor envelopes → data/raw/cursor/
+  ingest_atif.py                # data/raw/<agent>/trajectory.json → DB
+  ingest_claude_code.py         # data/raw/claude_code/*.jsonl → DB
+  ingest_swe_agent.py           # data/raw/swe_agent/*.json → DB
+  ingest_codex.py               # data/raw/codex/*.jsonl → DB (recursive)
+  ingest_cursor.py              # data/raw/cursor/*.cursor.json → DB
+  verify.py                     # SELECT + pretty-print + format/has_error breakdown
+  breakdown.py                  # success/failure + synthetic failure-mode counts
+  inspect_trace.py              # one-trace detail view
 tests/
   fixtures/
     claude_code_minimal.jsonl   # synthetic ~14-event Claude Code session
-    swe_agent_sample.json       # synthetic SWE-agent HF row (10 traj entries)
+    swe_agent_sample.json       # synthetic SWE-agent HF row
+    codex_sample.jsonl          # synthetic 13-line Codex rollout
+    cursor_sample.cursor.json   # synthetic 6-message Cursor envelope
   test_claude_code_adapter.py
+  test_codex_adapter.py
+  test_cursor_adapter.py
   test_detect.py
   test_pipeline_has_error.py
   test_swe_agent_adapter.py
 data/
-  raw/                     # downloaded inputs (gitignored)
+  raw/
+    codex/                 # synthetic rollouts (committed; see data/raw/codex/README.md)
+    cursor/                # synthetic envelopes (committed; see data/raw/cursor/README.md)
+    swe_agent/             # downloaded HF rows (gitignored)
+    claude_code/           # user-supplied Claude sessions (gitignored)
   marketplace.db           # SQLite (gitignored)
 ```
 
@@ -103,4 +124,4 @@ file path → detect_format → adapter.to_atif → redact (stub) → insert_tra
                        None
 ```
 
-Adding a new format = drop a `BaseAdapter` subclass into `trace_marketplace/adapters/`, register it in `ADAPTERS`, extend `detect_format`. To populate `has_error`, set `trajectory.extra["resolved"] = bool(...)` in the adapter; the pipeline does the inversion (`has_error = int(not resolved)`) once, generically.
+Adding a new format = drop a `BaseAdapter` subclass into `trace_marketplace/adapters/`, register it in `ADAPTERS`, extend `detect_format`. To populate `has_error`, set `trajectory.extra["resolved"] = bool(...)` in the adapter; the pipeline does the inversion (`has_error = int(not resolved)`) once, generically. To carry a named failure-mode ground-truth label, set `trajectory.extra["synthetic_failure_mode"] = "..."` (or have the adapter pick up a `synthetic_failure_mode` field from the raw input, as Codex/Cursor do).

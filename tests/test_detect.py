@@ -102,6 +102,160 @@ def test_atif_still_detected_when_swe_agent_keys_partial(tmp_path: Path) -> None
 
 
 # --------------------------------------------------------------------------- #
+# Cursor (.cursor.json extension OR .json with v1 envelope shape) detection
+# --------------------------------------------------------------------------- #
+
+
+def test_detects_cursor_from_extension_hint(tmp_path: Path) -> None:
+    p = _write(
+        tmp_path / "session.cursor.json",
+        json.dumps(
+            {
+                "session_id": "x",
+                "messages": [{"role": "user", "content": "hi"}],
+            }
+        ),
+    )
+    assert detect_format(p) == "cursor"
+
+
+def test_detects_cursor_from_envelope_shape_without_extension(tmp_path: Path) -> None:
+    p = _write(
+        tmp_path / "plain.json",
+        json.dumps(
+            {
+                "session_id": "x",
+                "messages": [{"role": "assistant", "content": "yo"}],
+            }
+        ),
+    )
+    assert detect_format(p) == "cursor"
+
+
+def test_cursor_envelope_requires_role_on_first_message(tmp_path: Path) -> None:
+    """Without a ``role`` field on messages[0] the file could be any
+    other ``{session_id, messages}`` JSON; we don't claim it for Cursor."""
+    p = _write(
+        tmp_path / "ambiguous.json",
+        json.dumps({"session_id": "x", "messages": [{"text": "hi"}]}),
+    )
+    assert detect_format(p) == "unknown"
+
+
+def test_cursor_envelope_requires_non_empty_messages(tmp_path: Path) -> None:
+    p = _write(
+        tmp_path / "ambiguous.json",
+        json.dumps({"session_id": "x", "messages": []}),
+    )
+    assert detect_format(p) == "unknown"
+
+
+def test_cursor_takes_precedence_over_atif_schema_version(tmp_path: Path) -> None:
+    """The ``.cursor.json`` extension is an unambiguous Cursor signal
+    even when the body somehow also carries ATIF schema markers."""
+    p = _write(
+        tmp_path / "weird.cursor.json",
+        json.dumps(
+            {
+                "schema_version": "ATIF-v1.7",
+                "session_id": "x",
+                "messages": [{"role": "user", "content": "hi"}],
+            }
+        ),
+    )
+    assert detect_format(p) == "cursor"
+
+
+# --------------------------------------------------------------------------- #
+# Codex (.jsonl with OpenAI Responses-API outer event types) detection
+# --------------------------------------------------------------------------- #
+
+
+def test_detects_codex_from_session_meta_first_line(tmp_path: Path) -> None:
+    p = _write(
+        tmp_path / "codex.jsonl",
+        json.dumps(
+            {
+                "type": "session_meta",
+                "payload": {"id": "sess-1", "cli_version": "0.32.0"},
+            }
+        ),
+    )
+    assert detect_format(p) == "codex"
+
+
+def test_detects_codex_from_response_item_first_line(tmp_path: Path) -> None:
+    """If a Codex JSONL gets sliced (no session_meta head), the first
+    response_item line should still classify."""
+    p = _write(
+        tmp_path / "codex_no_head.jsonl",
+        json.dumps(
+            {
+                "type": "response_item",
+                "payload": {"type": "message", "role": "user", "content": []},
+            }
+        ),
+    )
+    assert detect_format(p) == "codex"
+
+
+def test_codex_takes_precedence_over_claude_code(tmp_path: Path) -> None:
+    """Codex's outer vocabulary doesn't overlap with Claude Code's. This
+    test pins that ordering -- if a future event type collides, we'll
+    catch it here."""
+    p = _write(
+        tmp_path / "ambiguous.jsonl",
+        json.dumps(
+            {
+                "type": "session_meta",
+                "sessionId": "ALSO_claude_looking",
+                "payload": {"id": "x"},
+            }
+        ),
+    )
+    assert detect_format(p) == "codex"
+
+
+def test_claude_code_still_wins_when_no_codex_marker(tmp_path: Path) -> None:
+    """The discriminator: Claude Code first lines carry camelCase
+    `sessionId` and have a vocabulary type like `permission-mode`."""
+    p = _write(
+        tmp_path / "cc.jsonl",
+        json.dumps(
+            {
+                "type": "permission-mode",
+                "sessionId": "abc-123",
+                "mode": "auto",
+            }
+        ),
+    )
+    assert detect_format(p) == "claude_code"
+
+
+def test_jsonl_with_unknown_top_level_type_is_unknown(tmp_path: Path) -> None:
+    p = _write(
+        tmp_path / "weird.jsonl",
+        json.dumps({"type": "completely-made-up-type", "payload": {}}),
+    )
+    assert detect_format(p) == "unknown"
+
+
+def test_detects_codex_from_compacted_first_line(tmp_path: Path) -> None:
+    """Forked Codex sessions can start with a `compacted` record. This
+    is the 5th variant of RolloutItem per codex-rs/protocol/src/protocol.rs."""
+    p = _write(
+        tmp_path / "forked.jsonl",
+        json.dumps(
+            {
+                "type": "compacted",
+                "payload": {"message": "summary text", "replacement_history": []},
+            }
+        ),
+    )
+    assert detect_format(p) == "codex"
+
+
+# --------------------------------------------------------------------------- #
 # Claude Code (.jsonl) detection
 # --------------------------------------------------------------------------- #
 
@@ -178,3 +332,62 @@ def test_does_not_raise_on_nonexistent_path(tmp_path: Path) -> None:
     # Either returns "unknown" or raises FileNotFoundError -- spec says
     # "never raises". Pin behaviour: detect_format swallows OS errors.
     assert detect_format(p) == "unknown"
+
+
+def test_does_not_raise_on_nonexistent_jsonl_path(tmp_path: Path) -> None:
+    """Regression for bugbot finding on PR #2: the .jsonl branch was
+    missing OSError handling around _first_non_empty_line, so missing
+    JSONL files raised FileNotFoundError instead of returning
+    'unknown'. The .json branch had been correctly wrapped; this test
+    pins the symmetric behaviour for .jsonl."""
+    p = tmp_path / "does_not_exist.jsonl"
+    assert detect_format(p) == "unknown"
+
+
+def test_does_not_raise_when_jsonl_path_is_a_directory(tmp_path: Path) -> None:
+    """``path.open()`` on a directory raises IsADirectoryError (a
+    subclass of OSError). detect_format must swallow it like any
+    other I/O failure."""
+    dir_with_jsonl_suffix = tmp_path / "wat.jsonl"
+    dir_with_jsonl_suffix.mkdir()
+    assert detect_format(dir_with_jsonl_suffix) == "unknown"
+
+
+def test_does_not_raise_when_json_path_is_a_directory(tmp_path: Path) -> None:
+    """Symmetric check for the .json branch -- already worked, but
+    pin it so a future refactor can't regress one without the other."""
+    dir_with_json_suffix = tmp_path / "wat.json"
+    dir_with_json_suffix.mkdir()
+    assert detect_format(dir_with_json_suffix) == "unknown"
+
+
+# --------------------------------------------------------------------------- #
+# Adapter <-> detector constants -- single source of truth
+# --------------------------------------------------------------------------- #
+#
+# These tests pin the post-bugbot invariant: the detector must NOT carry
+# its own copy of any adapter-owned format-shape constant. Drift between
+# the two used to manifest as files that pass detection but are rejected
+# by the adapter, or vice versa, with no obvious link between the two
+# definitions. (Caught by Cursor bugbot on PR #2 commit 3dd7a3e.)
+
+
+def test_swe_agent_required_keys_is_the_adapter_constant() -> None:
+    """``detect.SWE_AGENT_REQUIRED_KEYS`` must BE
+    ``swe_agent.REQUIRED_TOP_LEVEL_KEYS`` -- not a copy of equal value.
+    ``is`` (object identity) catches the most likely drift mode where
+    someone re-introduces a local frozenset literal in detect.py with
+    the same contents today but diverging contents tomorrow."""
+    from trace_marketplace.adapters import swe_agent as swe_agent_adapter
+    from trace_marketplace.ingest import detect
+
+    assert detect.SWE_AGENT_REQUIRED_KEYS is swe_agent_adapter.REQUIRED_TOP_LEVEL_KEYS
+
+
+def test_codex_outer_event_types_is_the_adapter_constant() -> None:
+    """``detect.CODEX_OUTER_EVENT_TYPES`` must BE
+    ``codex.OUTER_EVENT_TYPES`` (same object). See note above."""
+    from trace_marketplace.adapters import codex as codex_adapter
+    from trace_marketplace.ingest import detect
+
+    assert detect.CODEX_OUTER_EVENT_TYPES is codex_adapter.OUTER_EVENT_TYPES
