@@ -53,7 +53,10 @@ def _print_table(rows: list[dict]) -> None:
 def _print_health(rows: list[dict]) -> int:
     total = len(rows)
     if total == 0:
-        print("\nWARNING: traces table is empty. Did you run ingest_atif.py?", file=sys.stderr)
+        print(
+            "\nWARNING: traces table is empty. Did you run ingest_atif.py?",
+            file=sys.stderr,
+        )
         return 1
 
     raw_ok = sum(1 for r in rows if (r.get("raw_blob_len") or 0) > 0)
@@ -93,8 +96,12 @@ def _show_json(db_path: Path, trace_id: str) -> int:
         print(f"atif.schema_version : {atif.get('schema_version')}")
         print(f"atif.session_id     : {atif.get('session_id')}")
         print(f"atif.agent          : {atif.get('agent')}")
-        print(f"atif.steps[0].source: {atif['steps'][0].get('source') if atif.get('steps') else 'NO STEPS'}")
-        print(f"atif.steps[0].keys  : {sorted((atif['steps'][0] if atif.get('steps') else {}).keys())}")
+        print(
+            f"atif.steps[0].source: {atif['steps'][0].get('source') if atif.get('steps') else 'NO STEPS'}"
+        )
+        print(
+            f"atif.steps[0].keys  : {sorted((atif['steps'][0] if atif.get('steps') else {}).keys())}"
+        )
     return 0
 
 
