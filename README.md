@@ -4,7 +4,9 @@ A failure-mode search engine for coding-agent traces. See [trace-marketplace-con
 
 ## Status
 
-**Slice 5 (current):** Browser uploads. The Streamlit UI gained an upload page (`?page=upload`) that drag-drops or pastes a trace through the existing `ingest_file()` pipeline + the rule-based failure pass, so a freshly uploaded trace lands in the list view with `has_error` and `failure_signals` populated within a single page render. LLM-judge stays a batch job, deliberately -- per-upload Sonnet calls would be slow and unbounded; fresh uploads pick up a `failure_label` on the next `scripts/judge_failures.py` run via the existing `WHERE failure_label IS NULL` gate. Per-file isolation means one bad payload in a multi-file submission can't tank the rest.
+**Slice 6 (current):** Embedding search + minimal NL query. Every trace with an ATIF blob gets a `text-embedding-3-small` vector cached in a new `trace_embeddings` table (idempotent on `source_text_hash`, ~$0.01 to backfill the full corpus). The list view gains a natural-language search box: Sonnet 4.6 parses the query into structured filters (`failure_label`, `source_format`, `agent_name`, `has_error`) plus a `semantic_intent` string, the intent is embedded once, and a brute-force numpy cosine NN ranks the filtered candidate pool. The detail view gains a **Find similar traces** button that runs the same NN against the current trace's cached vector (zero API cost, sub-100ms response). Both features degrade gracefully when `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` is missing.
+
+**Slice 5:** Browser uploads. The Streamlit UI gained an upload page (`?page=upload`) that drag-drops or pastes a trace through the existing `ingest_file()` pipeline + the rule-based failure pass, so a freshly uploaded trace lands in the list view with `has_error` and `failure_signals` populated within a single page render. LLM-judge stays a batch job, deliberately -- per-upload Sonnet calls would be slow and unbounded; fresh uploads pick up a `failure_label` on the next `scripts/judge_failures.py` run via the existing `WHERE failure_label IS NULL` gate. Per-file isolation means one bad payload in a multi-file submission can't tank the rest.
 
 **Slice 4:** Failure-detection enrichment. Deterministic rule pass (`scripts/detect_failures.py`) populates a new `failure_signals` JSON column and fills `has_error` for unlabelled traces; `scripts/validate_detection.py` benchmarks the rules against SWE-agent ground truth (precision ~0.78, recall ~0.48 aggregate, full table in [data/validation_report.md](data/validation_report.md)). LLM judge (`scripts/judge_failures.py`, Sonnet 4.6) classifies each flagged + sampled trace into an 11-way `FailureLabel` enum plus a rich shop-window paragraph of reasoning. Both passes are idempotent.
 
@@ -121,6 +123,52 @@ Format detection is content-based, so the file extension doesn't have to match t
 
 > Drop a replacement screenshot into `docs/screenshots/upload_view.png` after each UI change.
 
+## Search the marketplace (slice 6)
+
+Two complementary search modes ride on a single shared embedding table.
+
+### Backfill embeddings (one-time)
+
+```bash
+export OPENAI_API_KEY=sk-...
+uv run python scripts/generate_embeddings.py --dry-run   # always estimate cost first
+uv run python scripts/generate_embeddings.py             # ~$0.01 for 527 traces, ~2 min
+```
+
+The script reads every `atif IS NOT NULL` row, derives a ~4 KB searchable blob (agent / model / failure label / task / tail-of-conversation) via [`trace_marketplace/search/text_extraction.py`](trace_marketplace/search/text_extraction.py), and stores the resulting 1536-dim `text-embedding-3-small` vector as float32 bytes in `trace_embeddings`. Each row also stores a `source_text_hash` so re-running is a free no-op when the underlying text hasn't changed.
+
+### Natural-language search (list view)
+
+A search bar above the page input parses queries like:
+
+* `find loops in claude_code` -> filters `failure_label=loop` + `source_format=claude_code`, ranks by intent embedding.
+* `agents that hallucinated tools` -> pure semantic; no filters, just nearest-neighbour ranking.
+* `successful traces that called grep then edit a lot` -> filters `has_error=false`, ranks against the behavioural intent.
+
+Under the hood: one Sonnet 4.6 tool-use call parses the query into structured filters + a `semantic_intent` string (see [`trace_marketplace/search/nl_query.py`](trace_marketplace/search/nl_query.py)). One OpenAI embedding call vectorises the intent. The result is intersected with the filter-derived candidate id list and ranked by cosine similarity. Per-query cost is ~$0.004; the result is cached in `st.session_state` so sidebar tweaks don't re-pay.
+
+### Find similar (detail view)
+
+A **Find similar traces** button under each trace's header runs the cosine NN against the corpus, excluding the source trace. No new API call -- the embedding is already cached. Click any hit to navigate to that trace's detail page; the panel stays sticky across the rerun via session-state caching.
+
+### Secrets
+
+Both features need API keys. Locally:
+
+```bash
+export OPENAI_API_KEY=sk-...
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+On Streamlit Cloud, open the app's settings -> **Secrets** and add both keys as TOML lines:
+
+```toml
+OPENAI_API_KEY = "sk-..."
+ANTHROPIC_API_KEY = "sk-ant-..."
+```
+
+Streamlit Cloud injects `secrets` entries into the process environment, so no code changes are needed. The UI degrades gracefully when either key is missing -- the NL search box surfaces a configuration hint instead of crashing.
+
 ## Tests
 
 ```bash
@@ -151,6 +199,13 @@ trace_marketplace/
     failure_taxonomy.py    # FailureLabel enum + descriptions (judge prompt source)
     failure_rules.py       # 5 pure signal_* fns + compute_signals aggregator
     failure_judge.py       # Anthropic SDK wrapper; tool-use structured output
+    embeddings.py          # slice 6: OpenAI text-embedding-3-small + sqlite storage
+  search/                  # slice 6: read-side search primitives
+    __init__.py
+    text_extraction.py     # ATIF dict -> compact ~4 KB embedding input
+    similar.py             # numpy cosine nearest-neighbour (shared by NL + Find Similar)
+    nl_query.py            # Anthropic tool-use NL parser
+    runner.py              # glue: parse -> filter -> embed intent -> rank
   ui/
     __init__.py
     app.py                 # 3-route router (page=upload / trace_id / list)
@@ -175,6 +230,7 @@ scripts/
   detect_failures.py            # slice 4: rule-based failure signal pass
   validate_detection.py         # slice 4: precision/recall vs SWE-agent ground truth
   judge_failures.py             # slice 4: LLM-judge pass (Sonnet 4.6)
+  generate_embeddings.py        # slice 6: text-embedding-3-small backfill (idempotent on source_text_hash)
   run_ui.sh                     # bash wrapper around `uv run streamlit run`
 tests/
   fixtures/
@@ -189,6 +245,10 @@ tests/
   test_pipeline_has_error.py
   test_swe_agent_adapter.py
   test_upload_integration.py    # slice 5: ingest + rule pass on a Claude Code JSONL fixture
+  test_text_extraction.py       # slice 6: ATIF -> embedding-input blob invariants
+  test_embeddings.py            # slice 6: OpenAI client + float32 roundtrip + upsert
+  test_similar.py               # slice 6: numpy cosine NN (pure, no mocks)
+  test_nl_query.py              # slice 6: NL parser (mocked Anthropic; pins prompt + tool schema)
 data/
   raw/
     codex/                 # synthetic rollouts (committed; see data/raw/codex/README.md)

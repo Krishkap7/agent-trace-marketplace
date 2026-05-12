@@ -58,6 +58,10 @@ import streamlit as st
 
 from trace_marketplace.enrich.failure_rules import persist_signals_for_trace
 from trace_marketplace.ingest.pipeline import IngestResult, ingest_file
+from trace_marketplace.search.runner import (
+    EmbedAndSimilarResult,
+    embed_and_recommend_similar,
+)
 
 log = logging.getLogger(__name__)
 
@@ -189,13 +193,19 @@ class _UploadOutcome:
     Exactly one of ``result`` or ``error`` is non-None. ``signals`` is
     populated only when ``result.validated`` (the ingest pipeline
     produced a parseable ATIF blob); raw-blob and adapter-failure rows
-    leave it as ``None``.
+    leave it as ``None``. ``embed_and_similar`` is populated when the
+    upload was a validated ATIF row AND
+    :func:`~trace_marketplace.search.runner.embed_and_recommend_similar`
+    ran (which is unconditional for validated rows but degrades
+    gracefully when ``OPENAI_API_KEY`` is missing); a non-validated
+    upload leaves it as ``None``.
     """
 
     filename: str
     result: IngestResult | None
     signals: dict[str, bool] | None
     error: str | None
+    embed_and_similar: EmbedAndSimilarResult | None = None
 
 
 def _process_upload(
@@ -255,8 +265,24 @@ def _process_upload(
                 ingest_result.trace_id,
             )
 
+    # Slice 6.5: embed the new row and look up neighbours so the
+    # result block can offer "similar traces to explore". Done only
+    # for validated ATIF uploads -- raw-blob rows have no text to
+    # extract. The helper is responsible for graceful degradation
+    # (missing OPENAI_API_KEY, network failures), so we don't need
+    # an outer try/except.
+    embed_and_similar: EmbedAndSimilarResult | None = None
+    if ingest_result.validated:
+        embed_and_similar = embed_and_recommend_similar(conn, ingest_result.trace_id)
+
     conn.commit()
-    return _UploadOutcome(safe_name, ingest_result, signals, None)
+    return _UploadOutcome(
+        filename=safe_name,
+        result=ingest_result,
+        signals=signals,
+        error=None,
+        embed_and_similar=embed_and_similar,
+    )
 
 
 def _format_signals(signals: dict[str, bool] | None) -> str:
@@ -299,6 +325,44 @@ def _render_outcome(outcome: _UploadOutcome) -> None:
         f"{_format_signals(outcome.signals)})"
     )
     st.markdown(f"[Open the trace ->]({trace_url})")
+    _render_similar_traces(outcome.embed_and_similar)
+
+
+def _render_similar_traces(
+    embed_and_similar: EmbedAndSimilarResult | None,
+) -> None:
+    """Inline "similar traces" panel under each successful upload.
+
+    Three states:
+
+    * Helper was never called (raw-blob upload) -> render nothing.
+    * Helper ran but short-circuited (no API key, malformed ATIF,
+      OpenAI failure) -> render a small caption with the reason.
+    * Helper succeeded -> render up to five ranked neighbours with
+      bookmarkable links.
+    """
+    if embed_and_similar is None:
+        return
+    if not embed_and_similar.embedded:
+        if embed_and_similar.skipped_reason:
+            st.caption(f"_{embed_and_similar.skipped_reason}_")
+        return
+    if not embed_and_similar.similar:
+        st.caption(
+            "_Embedded, but no other traces are close enough to surface. "
+            "(The neighbourhood is sparse for very short or very generic "
+            "traces.)_"
+        )
+        return
+    with st.container(border=True):
+        st.markdown(
+            "**Related traces you might want to check out** (cosine nearest neighbours)"
+        )
+        for hit in embed_and_similar.similar:
+            sim_url = f"?trace_id={quote(str(hit.trace_id), safe='')}"
+            st.markdown(
+                f"- [`{hit.trace_id}`]({sim_url}) — similarity **{hit.similarity:.3f}**"
+            )
 
 
 def _render_files_tab(conn: sqlite3.Connection) -> None:

@@ -58,6 +58,22 @@ CREATE TABLE IF NOT EXISTS traces (
     -- Reserved for slice 5 (embeddings + semantic search).
     embedding_id             TEXT
 );
+
+CREATE TABLE IF NOT EXISTS trace_embeddings (
+    -- Slice 6: one row per trace, holding a single text-embedding-3-small
+    -- vector packed as float32 bytes. The vector is keyed off the source
+    -- text hash so re-running the backfill is idempotent (we skip rows
+    -- whose ``source_text_hash`` already matches) and stale rows can be
+    -- detected if text-extraction logic changes later. ``ON DELETE
+    -- CASCADE`` keeps the embedding table tidy if a trace is ever
+    -- removed (though slice 5's upload path is INSERT-OR-REPLACE, not
+    -- delete-then-insert, so the cascade is just a safety net).
+    trace_id          TEXT PRIMARY KEY REFERENCES traces(id) ON DELETE CASCADE,
+    embedding         BLOB NOT NULL,
+    model             TEXT NOT NULL,
+    embedded_at       TEXT NOT NULL,
+    source_text_hash  TEXT NOT NULL
+);
 """
 
 
@@ -95,11 +111,37 @@ def _migrate_add_failure_columns(conn: sqlite3.Connection) -> None:
     conn.commit()
 
 
+def _migrate_add_embeddings_table(conn: sqlite3.Connection) -> None:
+    """Idempotently create the slice 6 ``trace_embeddings`` table.
+
+    ``SCHEMA_SQL`` already includes the ``CREATE TABLE IF NOT EXISTS``
+    so on a fresh DB this is a no-op. On an existing DB that pre-dates
+    slice 6 we still want the table to appear without forcing a manual
+    ``init_schema`` invocation, so the migration is just an explicit
+    ``executescript`` of the same DDL. Pulled into its own helper so
+    tests can assert that running it twice is safe and so future
+    schema tweaks (e.g. an index) have an obvious place to live.
+    """
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS trace_embeddings (
+            trace_id          TEXT PRIMARY KEY REFERENCES traces(id) ON DELETE CASCADE,
+            embedding         BLOB NOT NULL,
+            model             TEXT NOT NULL,
+            embedded_at       TEXT NOT NULL,
+            source_text_hash  TEXT NOT NULL
+        );
+        """
+    )
+    conn.commit()
+
+
 def init_schema(conn: sqlite3.Connection) -> None:
     """Create the ``traces`` table if it doesn't exist, then run any
     idempotent column-addition migrations against an existing DB."""
     conn.executescript(SCHEMA_SQL)
     _migrate_add_failure_columns(conn)
+    _migrate_add_embeddings_table(conn)
     conn.commit()
 
 
@@ -194,6 +236,7 @@ __all__ = [
     "init_schema",
     "insert_trace",
     "_migrate_add_failure_columns",
+    "_migrate_add_embeddings_table",
 ]
 
 

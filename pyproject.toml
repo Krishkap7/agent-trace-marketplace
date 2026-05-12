@@ -7,6 +7,17 @@ dependencies = [
     "anthropic>=0.40.0,<1.0",
     "harbor>=0.6.6",
     "huggingface-hub>=0.24.0",
+    # numpy is a transitive of pyarrow today, but slice 6's vector NN
+    # primitive (search/similar.py) calls into numpy directly so we
+    # pin it explicitly. The major version is bounded so a numpy 3.x
+    # release can't silently break the cosine-similarity dot product.
+    "numpy>=2.0,<3.0",
+    # OpenAI client for text-embedding-3-small. Slice 6's embeddings
+    # pass + the NL-query semantic-intent embedding both go through
+    # this SDK. Range is widened to <3.0 because harbor transitively
+    # requires openai 2.x via litellm; the embeddings.create API is
+    # stable across the 1.x -> 2.x boundary so this is safe.
+    "openai>=1.50,<3.0",
     "pyarrow>=15.0.0",
     "streamlit>=1.40,<2.0",
 ]
