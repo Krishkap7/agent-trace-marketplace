@@ -14,6 +14,8 @@ import pytest
 
 from trace_marketplace.ui.queries import (
     DISTINCT_VALUE_COLUMNS,
+    HAS_ERROR_OPTIONS,
+    HAS_ERROR_VALUES,
     ListFilters,
     bounds,
     distinct_values,
@@ -211,6 +213,25 @@ def test_distinct_value_columns_does_not_include_dangerous_columns() -> None:
     assert "raw_blob" not in DISTINCT_VALUE_COLUMNS
     assert "atif" not in DISTINCT_VALUE_COLUMNS
     assert "id" not in DISTINCT_VALUE_COLUMNS
+
+
+# ---------- has_error ordering (frozenset iteration determinism bug) ----------
+
+
+def test_has_error_options_is_an_ordered_tuple_with_any_first() -> None:
+    # Pins the radio default. ``HAS_ERROR_OPTIONS[0]`` is what
+    # ``st.sidebar.radio(..., index=0)`` selects on first render; any
+    # other value would silently filter the list view on app load.
+    assert isinstance(HAS_ERROR_OPTIONS, tuple)
+    assert HAS_ERROR_OPTIONS[0] == "any"
+    assert HAS_ERROR_OPTIONS == ("any", "errors", "successes", "unknown")
+
+
+def test_has_error_options_and_values_stay_in_sync() -> None:
+    # The frozenset is derived from the tuple, so they must match by
+    # content. A future contributor adding a 5th has_error mode must
+    # touch both, and this test forces that.
+    assert set(HAS_ERROR_OPTIONS) == HAS_ERROR_VALUES
 
 
 # ---------- trace_counts / bounds ----------

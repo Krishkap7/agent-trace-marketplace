@@ -38,8 +38,20 @@ DISTINCT_VALUE_COLUMNS: frozenset[str] = frozenset(
 is an explicit allow-list because the column name is interpolated into
 the SQL string and we need to be sure it can't come from user input."""
 
-HAS_ERROR_VALUES: frozenset[str] = frozenset({"any", "errors", "successes", "unknown"})
-"""Allowed values for the ``has_error`` 3-way filter."""
+HAS_ERROR_OPTIONS: tuple[str, ...] = ("any", "errors", "successes", "unknown")
+"""Canonical, *ordered* list of values for the ``has_error`` 4-way
+filter. The order is the order the UI shows them in, so the first
+entry (``"any"``) is also the radio's default.
+
+Lives as a tuple, not a frozenset, because ``frozenset`` iteration
+order depends on PYTHONHASHSEED -- if the UI did ``list(HAS_ERROR_VALUES)``
+the default radio choice could rotate between process restarts.
+(Caught by Cursor bugbot on commit 655c824.)
+"""
+
+HAS_ERROR_VALUES: frozenset[str] = frozenset(HAS_ERROR_OPTIONS)
+"""Membership-check set derived from :data:`HAS_ERROR_OPTIONS`. Used
+by :func:`_build_where` for O(1) validation; never iterated."""
 
 
 @dataclass(frozen=True)
@@ -239,6 +251,7 @@ def bounds(conn: sqlite3.Connection) -> dict[str, int]:
 
 __all__ = [
     "DISTINCT_VALUE_COLUMNS",
+    "HAS_ERROR_OPTIONS",
     "HAS_ERROR_VALUES",
     "LIST_COLUMNS",
     "ListFilters",

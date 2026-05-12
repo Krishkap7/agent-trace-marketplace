@@ -19,7 +19,7 @@ import streamlit as st
 
 from trace_marketplace.ui.components import render_filters_summary
 from trace_marketplace.ui.queries import (
-    HAS_ERROR_VALUES,
+    HAS_ERROR_OPTIONS,
     LIST_COLUMNS,
     ListFilters,
     bounds,
@@ -87,7 +87,9 @@ def _sidebar_filters(conn: sqlite3.Connection) -> ListFilters:
 
     has_error_choice = st.sidebar.radio(
         "has_error",
-        options=list(HAS_ERROR_VALUES),
+        # Use the ordered tuple, not the frozenset: list(frozenset) is
+        # hash-seed-dependent so index=0 would otherwise be flaky.
+        options=HAS_ERROR_OPTIONS,
         index=0,
         format_func=lambda v: _HAS_ERROR_LABELS.get(v, v),
     )
