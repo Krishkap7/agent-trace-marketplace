@@ -21,13 +21,21 @@ from typing import Any
 import streamlit as st
 
 SOURCE_LABELS: dict[str, str] = {
-    "user": "User",
-    "agent": "Agent",
-    "system": "System",
-    "tool": "Tool",
+    "user": "User (human / task setup)",
+    "agent": "Agent (the model under study)",
+    "system": "System (harness / tooling)",
+    "tool": "Tool (function result)",
 }
 """Friendly labels for ATIF ``Step.source`` values. Unknown sources
-render with the raw string in title-case."""
+render with the raw string in title-case.
+
+The parenthetical disambiguators are deliberate: real users on the
+deployed UI repeatedly read ``System`` as "the marketplace's system"
+or "the LLM judge" rather than "the agent harness that fed this
+prompt to the model under study". Naming the role concretely once
+in the step header makes the conversation thread self-describing
+without a separate legend.
+"""
 
 
 def _pretty_arguments(arguments: Any) -> str:

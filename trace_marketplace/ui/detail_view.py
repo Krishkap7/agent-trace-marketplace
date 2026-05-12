@@ -116,11 +116,22 @@ def render(conn: sqlite3.Connection, trace_id: str) -> None:
             row.get("agent_name") or agent_blob.get("name") or "this agent"
         )
         agent_model = row.get("model") or agent_blob.get("model_name") or "?"
-        st.caption(
+        st.markdown(
             f"Step-by-step record of what the **{agent_name}** agent "
-            f"(model `{agent_model}`) did at run time. Everything below "
-            "is the *original* trace; the analysis above is from our "
-            "slice-4 detection pipeline."
+            f"(model `{agent_model}`) did at run time. **Everything "
+            "below is the *original* trace** -- none of it is written "
+            "by our LLM judge."
+        )
+        # Inline legend for the role badges so the user doesn't read
+        # "System" as "our system" or "Sonnet's commentary". This
+        # matters most for SWE-agent traces, whose first two steps are
+        # System-role harness scaffolding (tool list, then the bug
+        # report + instructions) before any agent turn appears.
+        st.caption(
+            "**Step roles:**  "
+            "`System` = harness / tool scaffolding (NOT our judge).  "
+            f"`Agent` = the `{agent_model}` model thinking and acting.  "
+            "`Tool` / `User` = tool result or human task setup, when present."
         )
         agent_summary_bits: list[str] = []
         if agent_blob.get("version"):
