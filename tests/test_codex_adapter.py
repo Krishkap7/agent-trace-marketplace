@@ -61,6 +61,95 @@ def test_agent_extra_carries_session_meta_payload(converted: Trajectory) -> None
     assert isinstance(extra.get("git"), dict)
 
 
+def test_reasoning_summary_dict_block_form_extracted(
+    adapter: CodexAdapter,
+) -> None:
+    """Real Codex (and our synthetic generator) emits the OpenAI
+    Responses-API canonical block form
+    ``[{"type": "summary_text", "text": "..."}]``. A previous version
+    only matched plain strings and silently dropped this shape -- a
+    bug Cursor bugbot caught. Pin both shapes explicitly."""
+    payload = "\n".join(
+        [
+            json.dumps(
+                {
+                    "type": "session_meta",
+                    "payload": {"id": "rs-test", "cli_version": "0.32.0"},
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "reasoning",
+                        "summary": [
+                            {"type": "summary_text", "text": "plan A"},
+                            {"type": "summary_text", "text": "plan B"},
+                        ],
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"text": "ack"}],
+                    },
+                }
+            ),
+        ]
+    )
+    traj = adapter.to_atif(payload)
+    assert traj is not None
+    agent_steps = [s for s in traj.steps if s.source == "agent"]
+    assert len(agent_steps) == 1
+    rc = (agent_steps[0].reasoning_content or "").lower()
+    assert "plan a" in rc
+    assert "plan b" in rc
+
+
+def test_reasoning_summary_legacy_plain_string_form_extracted(
+    adapter: CodexAdapter,
+) -> None:
+    """The legacy plain-string form ``["..."]`` must still work for
+    older Codex rollouts / simplified emitters."""
+    payload = "\n".join(
+        [
+            json.dumps(
+                {
+                    "type": "session_meta",
+                    "payload": {"id": "rs-legacy", "cli_version": "0.20.0"},
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "reasoning",
+                        "summary": ["legacy reasoning"],
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"text": "ack"}],
+                    },
+                }
+            ),
+        ]
+    )
+    traj = adapter.to_atif(payload)
+    assert traj is not None
+    agent_steps = [s for s in traj.steps if s.source == "agent"]
+    assert "legacy reasoning" in (agent_steps[0].reasoning_content or "").lower()
+
+
 def test_synthetic_failure_mode_propagates_to_trajectory_extra(
     adapter: CodexAdapter,
 ) -> None:

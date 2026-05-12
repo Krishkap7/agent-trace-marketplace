@@ -4,7 +4,7 @@
 {"type": "response_item", "timestamp": "2026-05-01T12:00:03Z", "payload": {"type": "reasoning", "summary": ["I'll start by listing the repo files."]}}
 {"type": "response_item", "timestamp": "2026-05-01T12:00:04Z", "payload": {"type": "function_call", "call_id": "fc_1", "name": "shell", "arguments": "{\"cmd\":[\"ls\",\"-la\"]}", "status": "completed"}}
 {"type": "response_item", "timestamp": "2026-05-01T12:00:05Z", "payload": {"type": "function_call_output", "call_id": "fc_1", "output": "{\"output\":\"foo.py\\nREADME.md\\ntests/\",\"metadata\":{\"exit_code\":0}}"}}
-{"type": "response_item", "timestamp": "2026-05-01T12:00:06Z", "payload": {"type": "reasoning", "summary": ["Found foo.py. Let me read it."]}}
+{"type": "response_item", "timestamp": "2026-05-01T12:00:06Z", "payload": {"type": "reasoning", "summary": [{"type": "summary_text", "text": "Found foo.py. Let me read it."}]}}
 {"type": "response_item", "timestamp": "2026-05-01T12:00:07Z", "payload": {"type": "function_call", "call_id": "fc_2", "name": "shell", "arguments": "{\"cmd\":[\"cat\",\"foo.py\"]}", "status": "completed"}}
 {"type": "response_item", "timestamp": "2026-05-01T12:00:08Z", "payload": {"type": "function_call_output", "call_id": "fc_2", "output": "{\"output\":\"x = 1\\ndef foo():\\n    return x\",\"metadata\":{\"exit_code\":0}}"}}
 {"type": "response_item", "timestamp": "2026-05-01T12:00:09Z", "payload": {"type": "web_search_call", "id": "ws_1", "action": {"type": "search", "query": "python module export pattern"}, "status": "completed"}}

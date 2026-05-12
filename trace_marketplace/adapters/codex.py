@@ -132,10 +132,27 @@ def _extract_message_text(content: Any) -> str:
 
 
 def _extract_reasoning_summary(summary: Any) -> str | None:
-    """Join the ``summary`` list of strings from a reasoning event."""
+    """Join a reasoning event's ``summary`` field into one string.
+
+    Real Codex emits the OpenAI Responses-API canonical block form:
+
+        "summary": [{"type": "summary_text", "text": "..."}]
+
+    Older / simplified emitters sometimes use a plain list of strings
+    (``["..."]``). We accept both so the adapter doesn't silently drop
+    reasoning on real production sessions just because the wire shape
+    is the canonical one.
+    """
     if not isinstance(summary, list) or not summary:
         return None
-    parts = [s for s in summary if isinstance(s, str) and s]
+    parts: list[str] = []
+    for entry in summary:
+        if isinstance(entry, str) and entry:
+            parts.append(entry)
+        elif isinstance(entry, dict):
+            text = entry.get("text")
+            if isinstance(text, str) and text:
+                parts.append(text)
     if not parts:
         return None
     return "\n".join(parts)
