@@ -44,9 +44,20 @@ JUDGE_TEMPERATURE: float = 0.0
 """Reproducibility. Re-running the script should pick the same label
 for the same trace, modulo provider-side nondeterminism."""
 
-JUDGE_MAX_TOKENS: int = 400
-"""Cap on the model's response. The tool call payload is short
-(label + one-sentence reasoning); 400 tokens is ample headroom."""
+JUDGE_MAX_TOKENS: int = 900
+"""Cap on the model's response. Sized for the v3 schema:
+
+* v1 (one sentence)     -> 400 tokens (over-provisioned, ~50 used).
+* v2 (2-3 sentences)    -> 600 tokens.
+* v3 (rich paragraph,
+  4-6 sentences,
+  ~150-220 words)        -> 900 tokens.
+
+The marketplace use-case is failure-mode *discovery*: users browse
+for rare / interesting traces, so the per-trace blurb is the shop
+window. Terse reasonings ("Agent gave up.") are useless for that;
+we want a paragraph that names concrete artefacts and flags
+notability. 900 gives ~600 output tokens for prose plus headroom."""
 
 INPUT_PRICE_PER_MTOK: float = 3.00
 """Sonnet 4.6 input token price in USD per million tokens. Updated
@@ -201,7 +212,11 @@ def _build_user_prompt(traj: dict[str, Any], signals: dict[str, bool]) -> str:
     fired_str = ", ".join(fired) if fired else "(none)"
 
     parts = [
-        "You are classifying agent trace failures from a coding-agent marketplace.",
+        "You are classifying agent trace failures for a marketplace of "
+        "coding-agent trajectories. Buyers browse this catalogue looking "
+        "for rare or instructive failure modes, so your `reasoning` is "
+        "the product description: it has to make the trace findable and "
+        "give a curious reader enough to decide whether to click in.",
         "",
         "Trace summary:",
         f"- Agent: {agent_name}   Model: {model_name}",
@@ -214,6 +229,27 @@ def _build_user_prompt(traj: dict[str, Any], signals: dict[str, bool]) -> str:
         "Pick exactly ONE label that best describes the trace.",
         "Use the `submit_label` tool to return your decision.",
         "",
+        "Reasoning style (the bar is high -- this is shop-window copy):",
+        "- Write a rich paragraph of 4-6 sentences (150-220 words, max",
+        "  ~1200 chars). Plain prose, no bullet points, no markdown",
+        "  headings.",
+        "- Sentence 1-2: what the agent was trying to do and the SHAPE",
+        "  of the failure, with concrete evidence (tool names, repeated",
+        "  arguments, step indexes like 'by step 25 of 30', exact error",
+        "  keywords, specific files / commands the agent fixated on).",
+        "- Sentence 3-4: WHY this label fits better than the closest",
+        "  alternative -- name the runner-up label explicitly and",
+        "  contrast.",
+        "- Sentence 5-6: a one-line note on what makes this trace",
+        "  NOTABLE (a textbook example of the label, an unusually long",
+        "  loop, a subtle misread, an interesting recovery attempt,",
+        "  etc.) so a browser can tell at a glance whether it's worth",
+        "  studying.",
+        "- Do NOT restate the label name or paraphrase its description.",
+        "- Do NOT begin with filler like 'The agent...' on every trace;",
+        "  vary openings.",
+        "- Quote tool calls / errors in backticks when it aids clarity.",
+        "",
         "Allowed labels:",
         labels_with_descriptions(),
     ]
@@ -225,7 +261,10 @@ _SUBMIT_TOOL: dict[str, Any] = {
     "description": (
         "Submit the final failure-mode classification for this trace. "
         "`label` must be one of the values listed in the prompt; "
-        "`reasoning` is one sentence (max ~200 chars) explaining the choice."
+        "`reasoning` is a rich shop-window paragraph (4-6 sentences, "
+        "150-220 words, max ~1200 chars) that names concrete evidence, "
+        "contrasts with the runner-up label, and flags what makes the "
+        "trace notable -- NOT a restatement of the label."
     ),
     "input_schema": {
         "type": "object",
@@ -239,7 +278,17 @@ _SUBMIT_TOOL: dict[str, Any] = {
             },
             "reasoning": {
                 "type": "string",
-                "description": "One sentence justifying the label.",
+                "description": (
+                    "4-6 sentences of plain prose (150-220 words, max "
+                    "~1200 chars). Cover: (a) what the agent was trying "
+                    "to do and the shape of the failure with concrete "
+                    "evidence (tool names, step indexes, error "
+                    "keywords); (b) why this label fits better than the "
+                    "closest alternative -- name the runner-up "
+                    "explicitly; (c) what makes the trace notable for a "
+                    "marketplace browser. No bullet points, no markdown "
+                    "headings, no restating the label name."
+                ),
             },
         },
     },

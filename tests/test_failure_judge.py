@@ -242,6 +242,25 @@ def test_build_user_prompt_summarises_long_trajectories_with_omitted_marker() ->
     assert "step 119" in prompt
 
 
+def test_build_user_prompt_asks_for_rich_shop_window_paragraph() -> None:
+    """v3 of the schema asks for a rich 4-6 sentence paragraph that
+    names concrete evidence, contrasts with a runner-up label, and
+    flags notability for marketplace browsers. Pin the language so
+    we notice if a future edit rolls the wording back."""
+    prompt = _build_user_prompt(_TRIVIAL_TRAJ, _TRIVIAL_SIGNALS)
+    assert "Reasoning style" in prompt
+    assert "4-6 sentences" in prompt
+    # The marketplace framing is what motivates the verbose reasoning.
+    assert "marketplace" in prompt.lower()
+    # Must instruct the model to compare against an alternative label
+    # (the "runner-up" contrast) and to flag notability.
+    assert "runner-up" in prompt or "alternative" in prompt
+    assert "notable" in prompt.lower() or "notability" in prompt.lower()
+    # Concrete evidence is the whole point; keep it pinned.
+    assert "concrete evidence" in prompt
+    assert "Do NOT" in prompt
+
+
 # ---------- cost helpers ----------
 
 

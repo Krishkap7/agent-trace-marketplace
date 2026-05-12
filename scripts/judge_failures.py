@@ -63,8 +63,13 @@ interactively. Keeps a bug that 10x's the call count from spending
 $50 silently."""
 
 # Token estimates for the dry-run cost projection.
+# v1 prompt used ~80 output tokens (one sentence).
+# v2 (2-3 sentences with evidence) was projected at ~200.
+# v3 (rich 4-6 sentence shop-window paragraph) targets ~500 output
+# tokens: 150-220 words * ~1.3 tokens/word + small slack, with a
+# JUDGE_MAX_TOKENS cap of 900 so any single outlier stays bounded.
 DRY_RUN_INPUT_TOKEN_ESTIMATE: int = 5_000
-DRY_RUN_OUTPUT_TOKEN_ESTIMATE: int = 80
+DRY_RUN_OUTPUT_TOKEN_ESTIMATE: int = 500
 
 
 @dataclass(frozen=True)
@@ -104,22 +109,41 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "this many dollars. Defaults to the slice 4 plan's $10 cap."
         ),
     )
+    parser.add_argument(
+        "--re-judge",
+        action="store_true",
+        help=(
+            "Also include traces that already have a failure_label. "
+            "Default behaviour skips them so reruns are resumable; use "
+            "this flag when the judge prompt or schema has changed and "
+            "you want to refresh the persisted reasonings against the "
+            "*same* set of traces that were judged on the previous run."
+        ),
+    )
     return parser.parse_args(argv)
 
 
-def _select_targets(conn: sqlite3.Connection) -> list[_Row]:
-    """Build the dry-run-stable selection set (deterministic order)."""
+def _select_targets(conn: sqlite3.Connection, *, re_judge: bool = False) -> list[_Row]:
+    """Build the dry-run-stable selection set (deterministic order).
+
+    When ``re_judge`` is False (default) we only consider traces whose
+    ``failure_label`` column is still NULL -- normal resumable runs.
+    When True, we relax the gate and re-evaluate every trace that has
+    parseable ATIF; this is used to refresh persisted reasonings after
+    a prompt-schema change. The success-sample logic still applies in
+    both modes so the selection set is reproducible across calls.
+    """
     failures: list[_Row] = []
     successes: list[_Row] = []
-    cur = conn.execute(
-        """
+    sql = """
         SELECT id, atif, has_error, failure_signals
           FROM traces
-         WHERE failure_label IS NULL
-           AND atif IS NOT NULL
-         ORDER BY id ASC
-        """
-    )
+         WHERE atif IS NOT NULL
+    """
+    if not re_judge:
+        sql += " AND failure_label IS NULL"
+    sql += " ORDER BY id ASC"
+    cur = conn.execute(sql)
     for row in cur:
         rec = _Row(
             trace_id=row["id"],
@@ -293,10 +317,20 @@ def main(argv: list[str] | None = None) -> int:
 
     with connect(args.db) as conn:
         init_schema(conn)
-        targets = _select_targets(conn)
+        targets = _select_targets(conn, re_judge=args.re_judge)
         if not targets:
-            print("No traces need judging (failure_label already populated).")
+            msg = (
+                "No traces matched the selection set."
+                if args.re_judge
+                else "No traces need judging (failure_label already populated)."
+            )
+            print(msg)
             return 0
+        if args.re_judge:
+            print(
+                f"--re-judge: ignoring failure_label gate; will overwrite "
+                f"reasoning + label for {len(targets)} already-judged traces."
+            )
         if args.dry_run:
             return _run_dry(targets)
         _confirm_or_abort(len(targets))
