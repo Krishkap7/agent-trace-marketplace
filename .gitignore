@@ -5,7 +5,13 @@ __pycache__/
 .localized
 .cache/
 
-data/raw/
+# ``data/raw/*`` not ``data/raw/`` -- git's negation rules cannot
+# re-include a file once its parent dir has been excluded, so we glob
+# the children instead and then un-ignore the synthetic Codex/Cursor
+# subdirs, which are project-shipped test data (not user uploads).
+data/raw/*
+!data/raw/codex/
+!data/raw/cursor/
 data/*.db
 data/*.db-journal
 data/*.db-wal

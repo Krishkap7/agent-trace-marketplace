@@ -1,0 +1,7 @@
+{"timestamp": "2026-05-01T12:00:07Z", "type": "session_meta", "payload": {"id": "sess-synth-codex-08-52985b6d", "cli_version": "0.32.0", "originator": "codex_cli_rs", "cwd": "/home/synth/project", "git": {"branch": "main", "commit": "0472c67"}, "base_instructions": "You are Codex, a careful coding assistant."}, "synthetic": true}
+{"timestamp": "2026-05-01T12:00:36Z", "type": "turn_context", "payload": {"model": "gpt-5-mini", "cwd": "/home/synth/project", "approval_policy": "on_request", "sandbox_policy": "workspace_write", "user_instructions": "Be terse. Prefer running shell over speculating."}}
+{"timestamp": "2026-05-01T12:01:12Z", "type": "response_item", "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "What's 2 + 2?"}]}}
+{"timestamp": "2026-05-01T12:01:53Z", "type": "response_item", "payload": {"type": "reasoning", "summary": [{"type": "summary_text", "text": "Trivial arithmetic."}]}}
+{"timestamp": "2026-05-01T12:02:11Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "4."}]}}
+{"timestamp": "2026-05-01T12:03:42Z", "type": "response_item", "payload": {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "4."}]}}
+{"timestamp": "2026-05-01T12:05:03Z", "type": "event_msg", "payload": {"type": "token_count", "info": {"input_tokens": 40, "cached_input_tokens": 4, "output_tokens": 8, "reasoning_output_tokens": 2, "total_tokens": 48}}}
