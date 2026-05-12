@@ -104,7 +104,24 @@ def render(conn: sqlite3.Connection, trace_id: str) -> None:
             "Showing the raw blob instead."
         )
     else:
+        # Visual signpost between the slice-4 analysis (everything above
+        # the divider, written by us / our LLM judge) and the trace
+        # content (everything below, written by the agent that produced
+        # the trace). Without this, the first system-prompt block reads
+        # as if the judge is still talking. The signpost names both
+        # actors so there's no ambiguity.
+        st.subheader("Agent trajectory")
         agent_blob = atif.get("agent") or {}
+        agent_name = (
+            row.get("agent_name") or agent_blob.get("name") or "this agent"
+        )
+        agent_model = row.get("model") or agent_blob.get("model_name") or "?"
+        st.caption(
+            f"Step-by-step record of what the **{agent_name}** agent "
+            f"(model `{agent_model}`) did at run time. Everything below "
+            "is the *original* trace; the analysis above is from our "
+            "slice-4 detection pipeline."
+        )
         agent_summary_bits: list[str] = []
         if agent_blob.get("version"):
             agent_summary_bits.append(f"version: `{agent_blob['version']}`")
