@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import math
 import sqlite3
-from typing import Any
+from urllib.parse import quote
 
 import streamlit as st
 
@@ -30,6 +30,15 @@ from trace_marketplace.ui.queries import (
 
 PAGE_SIZE: int = 100
 """Acceptance-criteria-mandated cap on rows per page."""
+
+_OPEN_LINK_COLUMN: str = "_open"
+"""Synthetic column injected into every list row so ``st.dataframe`` can
+render an explicit ``Open ->`` link via ``st.column_config.LinkColumn``.
+Replaces the older ``selection_mode='single-row'`` checkbox pattern: a
+labelled link is a much more discoverable affordance for "click to drill
+in" than a single-row checkbox that looks like a multi-select toggle.
+The underscore prefix keeps the name visually distinct from real
+SQL-projected columns in :data:`LIST_COLUMNS`."""
 
 _HAS_ERROR_LABELS: dict[str, str] = {
     "any": "All",
@@ -167,27 +176,13 @@ def _sidebar_filters(conn: sqlite3.Connection) -> ListFilters:
     )
 
 
-def _on_row_select(
-    rows: list[dict[str, Any]],
-    selection_rows: list[int],
-) -> None:
-    """When the user single-clicks a row, push the trace id into the
-    query params and rerun so ``app.py`` routes to the detail view."""
-    if not selection_rows:
-        return
-    idx = selection_rows[0]
-    if 0 <= idx < len(rows):
-        st.query_params["trace_id"] = rows[idx]["id"]
-        st.rerun()
-
-
 def render(conn: sqlite3.Connection) -> None:
     """Render the list view. ``app.py`` calls this when no
     ``?trace_id=`` query param is present."""
     st.title("Trace marketplace")
     st.caption(
         "Browse ingested coding-agent traces. Use the sidebar to filter; "
-        "click any row to open the detail view."
+        "click **Open ->** on any row to see the full trace."
     )
 
     filters = _sidebar_filters(conn)
@@ -212,17 +207,30 @@ def render(conn: sqlite3.Connection) -> None:
         st.info("No traces match these filters.")
         return
 
-    event = st.dataframe(
+    # Inject a same-page relative URL per row. ``quote(..., safe='')``
+    # percent-encodes any character that's not in the unreserved set,
+    # so SWE-agent IDs like ``Shoobx__mypy-zope-88`` survive verbatim
+    # but a future trace_id containing ``&``, ``?``, ``#``, or ``=``
+    # can't break out of the ``trace_id`` value. Streamlit detects
+    # the query_params change on click and reruns -- ``app.py``'s
+    # router lands the user on the detail view.
+    for row in rows:
+        row[_OPEN_LINK_COLUMN] = f"?trace_id={quote(str(row['id']), safe='')}"
+
+    st.dataframe(
         rows,
-        column_order=LIST_COLUMNS,
+        column_order=(_OPEN_LINK_COLUMN, *LIST_COLUMNS),
+        column_config={
+            _OPEN_LINK_COLUMN: st.column_config.LinkColumn(
+                label="Details",
+                display_text="Open ->",
+                help="Open the full conversation thread + judge reasoning.",
+            ),
+        },
         hide_index=True,
         width="stretch",
-        on_select="rerun",
-        selection_mode="single-row",
         key="list_table",
     )
-    selection_rows = event.selection.rows if hasattr(event, "selection") else []
-    _on_row_select(rows, list(selection_rows or []))
 
 
 __all__ = ["PAGE_SIZE", "render"]
