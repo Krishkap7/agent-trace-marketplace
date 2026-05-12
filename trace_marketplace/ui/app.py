@@ -4,11 +4,20 @@ Run with::
 
     uv run streamlit run trace_marketplace/ui/app.py
 
-Routing is URL-driven: the presence of ``?trace_id=<id>`` in
-``st.query_params`` selects the detail view, anything else lands on
-the filterable list view. Keeping all routing in this one file makes
-the link contract obvious -- the list view writes that param, the
-detail view reads it, and the back button clears it.
+Routing is URL-driven, decided by the order of checks here:
+
+1. ``?page=upload``  -> :mod:`trace_marketplace.ui.upload_view` (slice 5)
+2. ``?trace_id=<id>`` -> :mod:`trace_marketplace.ui.detail_view`
+3. otherwise         -> :mod:`trace_marketplace.ui.list_view` (filterable)
+
+``page`` is checked first so the upload form is reachable even if the
+URL also carries a stale ``trace_id`` from a prior view (e.g. someone
+edits the URL by hand after clicking into a detail page).
+
+Keeping all routing in this one file makes the link contract obvious:
+the list view writes ``?trace_id=...``, the upload-CTA writes
+``?page=upload``, the detail view's back button clears both, and
+nothing else mutates ``st.query_params``.
 """
 
 from __future__ import annotations
@@ -19,7 +28,7 @@ from pathlib import Path
 import streamlit as st
 
 from trace_marketplace.storage.db import DEFAULT_DB_PATH, init_schema
-from trace_marketplace.ui import detail_view, list_view
+from trace_marketplace.ui import detail_view, list_view, upload_view
 
 
 @st.cache_resource
@@ -57,13 +66,22 @@ def main() -> None:
 
     conn = _get_conn(str(DEFAULT_DB_PATH))
 
+    page = st.query_params.get("page")
+    if isinstance(page, list):
+        page = page[0] if page else None
+
     trace_id = st.query_params.get("trace_id")
     if isinstance(trace_id, list):
         # Streamlit returns a list when the param is repeated; take
         # the first occurrence for backwards compatibility.
         trace_id = trace_id[0] if trace_id else None
 
-    if trace_id:
+    # ``page`` is checked first: it's the explicit navigation knob,
+    # while ``trace_id`` is a content reference that might linger in
+    # the URL after the user navigates elsewhere by hand.
+    if page == "upload":
+        upload_view.render(conn)
+    elif trace_id:
         detail_view.render(conn, trace_id)
     else:
         list_view.render(conn)
