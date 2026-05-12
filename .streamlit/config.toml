@@ -1,0 +1,25 @@
+# Streamlit theme for the trace marketplace UI.
+#
+# Warm brown + cream palette inspired by the editorial "fleet" mark:
+# dark espresso background, soft cream text, warm tan accent. Streamlit
+# applies these to every built-in widget (sidebar, buttons, inputs,
+# st.dataframe, st.metric, etc.) so the directory-search feel stays
+# consistent without per-widget CSS overrides.
+#
+# Streamlit Cloud reads this file at deploy time. Local `streamlit run`
+# picks it up automatically because `.streamlit/` sits at the repo
+# root. Keep keys to the documented set in
+# https://docs.streamlit.io/library/advanced-features/theming -- newer
+# keys (font-stack overrides, etc.) are deferred to per-page CSS
+# injection in `trace_marketplace/ui/components.py::inject_global_styles`.
+
+[theme]
+base = "dark"
+primaryColor = "#d4a574"
+backgroundColor = "#2b1f17"
+secondaryBackgroundColor = "#3a2a1e"
+textColor = "#f4ebe1"
+font = "serif"
+
+[browser]
+gatherUsageStats = false

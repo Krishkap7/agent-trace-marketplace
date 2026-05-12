@@ -1,27 +1,28 @@
 """Filterable + paginated list view.
 
 Composition only -- pulls counts/options/rows from :mod:`queries` and
-hands the dataframe selection event back to ``app.py`` via
-``st.query_params`` so detail-view links are bookmarkable.
+renders each row as a directory-style card via
+:func:`components.render_directory_row`. Detail-view links go through
+``?trace_id=...`` so bookmarkability is preserved without any JS state.
 
-The 100-row page cap is the prompt's acceptance criterion; pagination is
-manual (LIMIT/OFFSET driven by ``st.number_input("Page")``) because
-``st.dataframe`` has no native pager.
+The 100-row page cap is the prompt's acceptance criterion; pagination
+is manual (LIMIT/OFFSET driven by ``st.number_input("Page")``).
 """
 
 from __future__ import annotations
 
 import math
 import sqlite3
-from urllib.parse import quote
 
 import streamlit as st
 
 from trace_marketplace.search.runner import NLSearchResult, run_nl_search
-from trace_marketplace.ui.components import render_filters_summary
+from trace_marketplace.ui.components import (
+    render_directory_row,
+    render_filters_summary,
+)
 from trace_marketplace.ui.queries import (
     HAS_ERROR_OPTIONS,
-    LIST_COLUMNS,
     ListFilters,
     bounds,
     distinct_values,
@@ -43,21 +44,48 @@ _NL_RESULT_STATE_KEY: str = "_slice6_nl_result"
 """Where the parsed :class:`NLSearchResult` is cached between reruns.
 Avoids re-paying the parse + embed cost on every widget tweak."""
 
-_OPEN_LINK_COLUMN: str = "_open"
-"""Synthetic column injected into every list row so ``st.dataframe`` can
-render an explicit ``Open ->`` link via ``st.column_config.LinkColumn``.
-Replaces the older ``selection_mode='single-row'`` checkbox pattern: a
-labelled link is a much more discoverable affordance for "click to drill
-in" than a single-row checkbox that looks like a multi-select toggle.
-The underscore prefix keeps the name visually distinct from real
-SQL-projected columns in :data:`LIST_COLUMNS`."""
+_PAGE_STATE_KEY: str = "_lv_page"
+"""Current 1-based page index. Set by the Prev / Next buttons; reset
+to 1 whenever the filter hash changes so a freshly-narrowed result
+set doesn't strand the user on an empty page 7."""
+
+_FILTER_HASH_KEY: str = "_lv_filter_hash"
+"""Tracks the previous render's filter hash so we can detect filter
+changes and snap the pager back to page 1 without a manual reset."""
+
+_FILTER_WIDGET_KEYS: tuple[str, ...] = (
+    "_lv_source_formats",
+    "_lv_failure_labels",
+    "_lv_has_error",
+    "_lv_search",
+    "_lv_agent_names",
+    "_lv_models",
+    "_lv_step_range",
+    "_lv_has_atif",
+)
+"""Explicit session_state keys for every sidebar filter widget so the
+empty-state 'Clear all filters' CTA can wipe them in one pass. Without
+explicit keys the widgets bind to auto-generated names we can't enumerate."""
 
 _HAS_ERROR_LABELS: dict[str, str] = {
     "any": "All",
-    "errors": "Errors only (has_error=1)",
-    "successes": "Successes only (has_error=0)",
-    "unknown": "Unknown only (has_error IS NULL)",
+    "errors": "Errors only",
+    "successes": "Successes only",
+    "unknown": "Unknown only",
 }
+
+
+def _reset_filters() -> None:
+    """Pop every sidebar-filter widget's session_state entry.
+
+    Called by the empty-state CTA so a user who's filtered themselves
+    into a corner can recover in one click. ``st.rerun()`` is the
+    caller's responsibility -- this just clears the keys.
+    """
+    for key in _FILTER_WIDGET_KEYS:
+        st.session_state.pop(key, None)
+    st.session_state.pop(_PAGE_STATE_KEY, None)
+    st.session_state.pop(_FILTER_HASH_KEY, None)
 
 
 def _has_atif_label(value: str) -> bool | None:
@@ -92,88 +120,101 @@ def _slider_to_step_bounds(
 def _sidebar_filters(conn: sqlite3.Connection) -> ListFilters:
     """Render the sidebar controls and return the user's selections.
 
-    Distinct-value lists are queried once per render. They're cheap (one
-    DISTINCT scan apiece) and a stale cache would mean the user can't
-    pick a freshly-ingested source format until they refresh, which is
-    worse than the cost.
+    Layout (slice 9 declutter):
+
+    * Primary filters always visible: ``source_format``,
+      ``failure_label``, ``has_error``, and the free-text search.
+      These are the four knobs the user reaches for in 90% of
+      sessions.
+    * Secondary filters tucked into an "Advanced filters" expander:
+      ``agent_name``, ``model``, ``num_steps`` slider, ``ATIF
+      column`` radio. They stay one click away without crowding the
+      default view.
+
+    Distinct-value lists are queried once per render. They're cheap
+    (one DISTINCT scan apiece) and a stale cache would mean the user
+    can't pick a freshly-ingested source format until they refresh.
     """
     st.sidebar.header("Filters")
     counts = trace_counts(conn)
-    # render_filters_summary uses bare ``st.markdown`` (so callers can
-    # render it anywhere they like), but we want it pinned to the
-    # sidebar -- wrap it in the sidebar context so the call lands
-    # alongside the filter widgets, not in the main body.
     with st.sidebar:
         render_filters_summary(counts)
     st.sidebar.divider()
 
     source_formats = tuple(
         st.sidebar.multiselect(
-            "source_format",
+            "Source format",
             options=distinct_values(conn, "source_format"),
             default=[],
-        )
-    )
-    agent_names = tuple(
-        st.sidebar.multiselect(
-            "agent_name",
-            options=distinct_values(conn, "agent_name"),
-            default=[],
-        )
-    )
-    models = tuple(
-        st.sidebar.multiselect(
-            "model",
-            options=distinct_values(conn, "model"),
-            default=[],
+            key="_lv_source_formats",
         )
     )
     failure_labels = tuple(
         st.sidebar.multiselect(
-            "failure_label  (populated by slice 4)",
+            "Failure label",
             options=distinct_values(conn, "failure_label"),
             default=[],
+            help="Sonnet 4.6 taxonomy classification. Empty on rows the judge hasn't seen yet.",
+            key="_lv_failure_labels",
         )
     )
-
     has_error_choice = st.sidebar.radio(
-        "has_error",
-        # Use the ordered tuple, not the frozenset: list(frozenset) is
-        # hash-seed-dependent so index=0 would otherwise be flaky.
+        "Outcome",
         options=HAS_ERROR_OPTIONS,
         index=0,
         format_func=lambda v: _HAS_ERROR_LABELS.get(v, v),
+        key="_lv_has_error",
     )
-
-    has_atif_choice = st.sidebar.radio(
-        "ATIF column",
-        options=("All", "Has ATIF", "Raw blob only"),
-        index=0,
-    )
-
-    step_bounds = bounds(conn)
-    lo = step_bounds["min_steps"]
-    hi = max(step_bounds["max_steps"], lo + 1)
-    selected_lo, selected_hi = st.sidebar.slider(
-        "num_steps range",
-        min_value=int(lo),
-        max_value=int(hi),
-        value=(int(lo), int(hi)),
-        help=(
-            "Leave at the full range to also include traces whose "
-            "num_steps is NULL (unknown-format / raw-blob rows)."
-        ),
-    )
-    min_steps, max_steps = _slider_to_step_bounds(
-        (int(selected_lo), int(selected_hi)),
-        (int(lo), int(hi)),
-    )
-
     search = st.sidebar.text_input(
-        "Search (id / agent_name / model)",
+        "Search",
         value="",
-        placeholder="case-insensitive substring",
+        placeholder="id, agent name, or model",
+        key="_lv_search",
     )
+
+    with st.sidebar.expander("Advanced filters", expanded=False):
+        agent_names = tuple(
+            st.multiselect(
+                "Agent name",
+                options=distinct_values(conn, "agent_name"),
+                default=[],
+                key="_lv_agent_names",
+            )
+        )
+        models = tuple(
+            st.multiselect(
+                "Model",
+                options=distinct_values(conn, "model"),
+                default=[],
+                key="_lv_models",
+            )
+        )
+
+        step_bounds = bounds(conn)
+        lo = step_bounds["min_steps"]
+        hi = max(step_bounds["max_steps"], lo + 1)
+        selected_lo, selected_hi = st.slider(
+            "Step count range",
+            min_value=int(lo),
+            max_value=int(hi),
+            value=(int(lo), int(hi)),
+            help=(
+                "Leave at the full range to also include traces whose "
+                "num_steps is NULL (unknown-format / raw-blob rows)."
+            ),
+            key="_lv_step_range",
+        )
+        min_steps, max_steps = _slider_to_step_bounds(
+            (int(selected_lo), int(selected_hi)),
+            (int(lo), int(hi)),
+        )
+        has_atif_choice = st.radio(
+            "ATIF availability",
+            options=("All", "Has ATIF", "Raw blob only"),
+            index=0,
+            help="Adapter-validated traces vs. raw-blob-only rows from unknown formats.",
+            key="_lv_has_atif",
+        )
 
     return ListFilters(
         source_formats=source_formats,
@@ -186,18 +227,6 @@ def _sidebar_filters(conn: sqlite3.Connection) -> ListFilters:
         max_steps=max_steps,
         search=search.strip(),
     )
-
-
-def _decorate_rows_with_open_link(rows: list[dict]) -> None:
-    """Inject the ``_open`` LinkColumn target onto each row in place.
-
-    Pulled out into a helper so the standard list path AND the NL
-    ranked-result path render via the same dataframe wiring; if a
-    future trace_id ever needs different encoding it lives in exactly
-    one place.
-    """
-    for row in rows:
-        row[_OPEN_LINK_COLUMN] = f"?trace_id={quote(str(row['id']), safe='')}"
 
 
 def _render_nl_search_box() -> str:
@@ -243,12 +272,16 @@ def _run_or_reuse_nl_search(conn: sqlite3.Connection, query: str) -> NLSearchRes
     any incidental Streamlit rerun) doesn't re-issue the parser /
     embed calls. Calling :func:`run_nl_search` directly is still the
     primary cost-control gate -- this layer is the "don't double-pay
-    for the same question" tier on top.
+    for the same question" tier on top. The first-time path is
+    wrapped in ``st.spinner`` so the user sees a "Searching..." badge
+    instead of a 3-5s blank stare while the parser + embedding round-
+    trip is in flight.
     """
     cached = st.session_state.get(_NL_RESULT_STATE_KEY)
     if isinstance(cached, tuple) and cached[0] == query:
         return cached[1]
-    result = run_nl_search(conn, query)
+    with st.spinner("Parsing query and searching..."):
+        result = run_nl_search(conn, query)
     st.session_state[_NL_RESULT_STATE_KEY] = (query, result)
     return result
 
@@ -299,65 +332,30 @@ def _render_nl_results(conn: sqlite3.Connection, result: NLSearchResult) -> None
         return
 
     rows_by_id = list_traces_by_ids(conn, [h.trace_id for h in result.hits])
-    enriched_rows: list[dict] = []
+    enriched: list[tuple[dict, float]] = []
     for hit in result.hits:
         row = rows_by_id.get(hit.trace_id)
         if row is None:
             continue
-        row = dict(row)
-        row["similarity"] = round(hit.similarity, 4)
-        enriched_rows.append(row)
-    _decorate_rows_with_open_link(enriched_rows)
+        enriched.append((dict(row), hit.similarity))
 
     st.markdown(
-        f"Showing **top {len(enriched_rows)}** of "
+        f"Showing **top {len(enriched)}** of "
         f"**{result.candidate_count}** candidate traces, ranked by "
         f"cosine similarity to the search intent."
     )
-    st.dataframe(
-        enriched_rows,
-        column_order=(_OPEN_LINK_COLUMN, "similarity", *LIST_COLUMNS),
-        column_config={
-            _OPEN_LINK_COLUMN: st.column_config.LinkColumn(
-                label="Details",
-                display_text="Open ->",
-                help="Open the full conversation thread + judge reasoning.",
-            ),
-            "similarity": st.column_config.NumberColumn(
-                label="Similarity",
-                format="%.4f",
-                help="Cosine similarity to the embedded search intent.",
-            ),
-        },
-        hide_index=True,
-        width="stretch",
-        key="nl_results_table",
-    )
+    for row, similarity in enriched:
+        render_directory_row(row, similarity=similarity)
 
 
 def render(conn: sqlite3.Connection) -> None:
     """Render the list view. ``app.py`` calls this when no
     ``?trace_id=`` or ``?page=...`` query param is present."""
-    header_col, cta_col = st.columns([5, 1])
-    with header_col:
-        st.title("Trace marketplace")
-        st.caption(
-            "Browse ingested coding-agent traces. Use the search box "
-            "or the sidebar to filter; click **Open ->** on any row "
-            "to see the full trace."
-        )
-    with cta_col:
-        # Plain anchor instead of ``st.button`` + ``st.query_params``
-        # write: the link is bookmarkable, opens in a new tab on
-        # middle-click, and is one fewer Streamlit rerun on the
-        # happy path. The CTA lives in a right-aligned column so it
-        # reads as a primary action without crowding the title.
-        st.markdown(
-            "<div style='text-align: right; padding-top: 1rem;'>"
-            "<a href='?page=upload' style='font-size: 1rem;'>"
-            "Upload trace -></a></div>",
-            unsafe_allow_html=True,
-        )
+    st.title("Trace marketplace")
+    st.caption(
+        "A search directory of coding-agent traces. "
+        "Type a question in the box below or use the sidebar filters."
+    )
 
     nl_query = _render_nl_search_box()
 
@@ -377,49 +375,71 @@ def render(conn: sqlite3.Connection) -> None:
         _render_nl_results(conn, result)
         return
 
-    page = st.number_input(
-        "Page",
-        min_value=1,
-        step=1,
-        value=1,
-        help=f"{PAGE_SIZE} rows per page.",
-    )
-    offset = (int(page) - 1) * PAGE_SIZE
-    rows, total = list_traces(conn, filters, limit=PAGE_SIZE, offset=offset)
+    # Snap back to page 1 whenever the filter set changes so a
+    # freshly-narrowed result set doesn't strand the user on an empty
+    # high-numbered page. ListFilters is a frozen dataclass so it
+    # hashes deterministically.
+    filter_hash = hash(filters)
+    if st.session_state.get(_FILTER_HASH_KEY) != filter_hash:
+        st.session_state[_PAGE_STATE_KEY] = 1
+        st.session_state[_FILTER_HASH_KEY] = filter_hash
+    current_page = int(st.session_state.get(_PAGE_STATE_KEY, 1))
 
+    offset = (current_page - 1) * PAGE_SIZE
+    rows, total = list_traces(conn, filters, limit=PAGE_SIZE, offset=offset)
     pages = max(1, math.ceil(total / PAGE_SIZE))
-    st.markdown(
-        f"Showing **{len(rows)}** of **{total}** matching rows. "
-        f"Page **{int(page)}** of **{pages}**."
-    )
+
+    # Defensive clamp: if a race / stale state put us past the last
+    # page, snap forward and re-fetch on the next rerun.
+    if current_page > pages:
+        st.session_state[_PAGE_STATE_KEY] = pages
+        st.rerun()
 
     if total == 0:
-        st.info("No traces match these filters.")
+        col_msg, col_cta = st.columns([3, 1])
+        with col_msg:
+            st.info("No traces match these filters.")
+        with col_cta:
+            if st.button("Clear all filters", width="stretch", key="_lv_clear"):
+                _reset_filters()
+                st.rerun()
         return
 
-    # Inject a same-page relative URL per row. ``quote(..., safe='')``
-    # percent-encodes any character that's not in the unreserved set,
-    # so SWE-agent IDs like ``Shoobx__mypy-zope-88`` survive verbatim
-    # but a future trace_id containing ``&``, ``?``, ``#``, or ``=``
-    # can't break out of the ``trace_id`` value. Streamlit detects
-    # the query_params change on click and reruns -- ``app.py``'s
-    # router lands the user on the detail view.
-    _decorate_rows_with_open_link(rows)
-
-    st.dataframe(
-        rows,
-        column_order=(_OPEN_LINK_COLUMN, *LIST_COLUMNS),
-        column_config={
-            _OPEN_LINK_COLUMN: st.column_config.LinkColumn(
-                label="Details",
-                display_text="Open ->",
-                help="Open the full conversation thread + judge reasoning.",
-            ),
-        },
-        hide_index=True,
-        width="stretch",
-        key="list_table",
+    st.markdown(
+        f"<div class='tm-pagecount'>Showing <b>{len(rows)}</b> of "
+        f"<b>{total}</b> matching traces.</div>",
+        unsafe_allow_html=True,
     )
+
+    for row in rows:
+        render_directory_row(row)
+
+    # Compact pager only shows up when there's more than one page.
+    if pages > 1:
+        col_prev, col_label, col_next = st.columns([1, 2, 1])
+        with col_prev:
+            if st.button(
+                "<- Prev",
+                width="stretch",
+                disabled=current_page <= 1,
+                key="_lv_prev",
+            ):
+                st.session_state[_PAGE_STATE_KEY] = current_page - 1
+                st.rerun()
+        with col_label:
+            st.markdown(
+                f"<div class='tm-pagelabel'>Page {current_page} of {pages}</div>",
+                unsafe_allow_html=True,
+            )
+        with col_next:
+            if st.button(
+                "Next ->",
+                width="stretch",
+                disabled=current_page >= pages,
+                key="_lv_next",
+            ):
+                st.session_state[_PAGE_STATE_KEY] = current_page + 1
+                st.rerun()
 
 
 __all__ = ["PAGE_SIZE", "render"]

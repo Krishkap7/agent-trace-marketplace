@@ -29,6 +29,7 @@ import streamlit as st
 
 from trace_marketplace.storage.db import DEFAULT_DB_PATH, init_schema
 from trace_marketplace.ui import detail_view, list_view, upload_view
+from trace_marketplace.ui.components import render_top_nav
 
 
 @st.cache_resource
@@ -80,10 +81,13 @@ def main() -> None:
     # while ``trace_id`` is a content reference that might linger in
     # the URL after the user navigates elsewhere by hand.
     if page == "upload":
+        render_top_nav("upload")
         upload_view.render(conn)
     elif trace_id:
+        render_top_nav("detail")
         detail_view.render(conn, trace_id)
     else:
+        render_top_nav("browse")
         list_view.render(conn)
 
 
