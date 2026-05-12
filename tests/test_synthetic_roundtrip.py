@@ -20,6 +20,9 @@ happened to use a different wire shape than the generators.
 
 from __future__ import annotations
 
+import hashlib
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -146,3 +149,101 @@ def test_cursor_synth_failure_modes_all_distinct() -> None:
         modes[path.name] = fm
     assert len(modes) == 3
     assert len(set(modes.values())) == 3, f"failure modes collide: {modes}"
+
+
+# --------------------------------------------------------------------------- #
+# --only N determinism -- pinning the per-scenario RNG fix.
+# --------------------------------------------------------------------------- #
+#
+# Regression for bugbot finding on PR #2 commit 8de398d: the generators
+# threaded a single shared rng across all scenarios, so ``--only N``
+# produced different bytes than scenario N in a full run (scenario N's
+# draws depended on scenarios 1..N-1 consuming the rng first). Now both
+# generators use a per-scenario sub-RNG derived from (SEED, index, kind),
+# making scenarios mutually independent.
+
+
+@pytest.mark.parametrize(
+    "script_name,glob",
+    [
+        ("generate_synthetic_codex.py", "codex_synth_{n:02d}_*.jsonl"),
+        ("generate_synthetic_cursor.py", "cursor_synth_{n:02d}_*.cursor.json"),
+    ],
+)
+@pytest.mark.parametrize("only_n", [1, 5, 10])
+def test_only_flag_byte_identical_to_full_run(
+    tmp_path: Path, script_name: str, glob: str, only_n: int
+) -> None:
+    """``--only N`` MUST produce byte-identical output to scenario N
+    in a full run. Subprocess so we exercise the exact code path
+    users hit -- shelling into the script, not importing it."""
+    script = REPO_ROOT / "scripts" / script_name
+    full_dir = tmp_path / "full"
+    only_dir = tmp_path / "only"
+    full_dir.mkdir()
+    only_dir.mkdir()
+
+    subprocess.run(
+        [sys.executable, str(script), "--out", str(full_dir)],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        [sys.executable, str(script), "--out", str(only_dir), "--only", str(only_n)],
+        check=True,
+        capture_output=True,
+    )
+
+    full_match = list(full_dir.glob(glob.format(n=only_n)))
+    only_match = list(only_dir.glob(glob.format(n=only_n)))
+    assert len(full_match) == 1, f"full run produced {len(full_match)} files matching {glob}"
+    assert len(only_match) == 1, f"--only {only_n} produced {len(only_match)} files"
+
+    full_bytes = full_match[0].read_bytes()
+    only_bytes = only_match[0].read_bytes()
+    assert full_bytes == only_bytes, (
+        f"{script_name} --only {only_n} drifted from full-run scenario {only_n}: "
+        f"full sha={hashlib.sha256(full_bytes).hexdigest()[:12]}, "
+        f"only sha={hashlib.sha256(only_bytes).hexdigest()[:12]} -- "
+        f"the per-scenario RNG fix has likely been reverted to a shared rng."
+    )
+
+
+@pytest.mark.parametrize(
+    "script_name,glob_pattern",
+    [
+        ("generate_synthetic_codex.py", "codex_synth_*.jsonl"),
+        ("generate_synthetic_cursor.py", "cursor_synth_*.cursor.json"),
+    ],
+)
+def test_committed_fixtures_are_a_no_op_under_full_regeneration(
+    tmp_path: Path, script_name: str, glob_pattern: str
+) -> None:
+    """Re-running the full generator into a fresh dir MUST produce
+    byte-identical files to what's committed in ``data/raw/{codex,cursor}/``.
+    Pins the README claim that "regeneration is a git no-op."
+
+    Catches three classes of breakage: shared-rng reintroduction, an
+    accidental tweak to SCENARIOS, or non-determinism inside a scenario
+    (e.g. inserting a non-seeded random call)."""
+    script = REPO_ROOT / "scripts" / script_name
+    out = tmp_path / "regen"
+    out.mkdir()
+    subprocess.run(
+        [sys.executable, str(script), "--out", str(out)],
+        check=True,
+        capture_output=True,
+    )
+
+    committed_dir = CODEX_DIR if "codex" in script_name else CURSOR_DIR
+    regen_files = sorted(out.glob(glob_pattern))
+    committed_files = sorted(committed_dir.glob(glob_pattern))
+    assert len(regen_files) == len(committed_files) == 10
+
+    for regen, committed in zip(regen_files, committed_files, strict=True):
+        assert regen.name == committed.name
+        assert regen.read_bytes() == committed.read_bytes(), (
+            f"{regen.name} drifted from committed copy -- "
+            f"either SCENARIOS was edited without re-running the generator, "
+            f"or non-deterministic state leaked into the generator."
+        )

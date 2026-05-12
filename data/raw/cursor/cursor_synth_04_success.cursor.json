@@ -1,5 +1,5 @@
 {
-  "session_id": "sess-synth-cursor-04-74910a77",
+  "session_id": "sess-synth-cursor-04-cbd45733",
   "cursor_version": "0.45.0",
   "workspace_path": "/Users/synth/projects/fictional",
   "model": "claude-3.5-sonnet",
@@ -8,7 +8,7 @@
     {
       "role": "user",
       "content": "Where is `WidgetFactory` defined?",
-      "timestamp": "2026-05-01T13:00:26Z"
+      "timestamp": "2026-05-01T13:00:07Z"
     },
     {
       "role": "assistant",
@@ -18,10 +18,10 @@
           "text": "Searching the repo."
         }
       ],
-      "timestamp": "2026-05-01T13:01:36Z",
+      "timestamp": "2026-05-01T13:01:00Z",
       "tool_calls": [
         {
-          "id": "tc-04-7eceec",
+          "id": "tc-04-a52d01",
           "name": "grep_search",
           "arguments": {
             "query": "class WidgetFactory"
@@ -32,10 +32,10 @@
     {
       "role": "user",
       "content": "",
-      "timestamp": "2026-05-01T13:02:49Z",
+      "timestamp": "2026-05-01T13:02:31Z",
       "tool_results": [
         {
-          "tool_call_id": "tc-04-7eceec",
+          "tool_call_id": "tc-04-a52d01",
           "content": "src/widgets/factory.py:12:class WidgetFactory:\n"
         }
       ]
@@ -48,7 +48,7 @@
           "text": "In `src/widgets/factory.py:12`."
         }
       ],
-      "timestamp": "2026-05-01T13:03:27Z"
+      "timestamp": "2026-05-01T13:03:35Z"
     }
   ]
 }

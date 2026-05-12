@@ -34,6 +34,7 @@ Determinism:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import random
 import uuid
@@ -45,6 +46,29 @@ OUT_DIR = Path(__file__).parent.parent / "data" / "raw" / "codex"
 SEED = 20260511
 CLI_VERSION = "0.32.0"
 ORIGINATOR = "codex_cli_rs"
+
+
+def _rng_for_scenario(scen: "Scenario") -> random.Random:
+    """Per-scenario deterministic RNG derived from ``(SEED, index, kind)``.
+
+    Two properties this guarantees:
+
+    1. ``--only N`` produces byte-identical output to scenario N in a
+       full run. A single shared rng threaded across all scenarios
+       (the old design) made scenario N's draws depend on scenarios
+       1..N-1, so ``--only N`` would silently diverge from the full
+       run -- breaking the documented "regeneration is a git no-op"
+       promise. Caught by Cursor bugbot on PR #2 commit 8de398d.
+    2. Edits to scenario K do not ripple into scenarios K+1..10's
+       bytes. Each scenario is independent of every other scenario.
+
+    Seed is hashed (not just summed with index) so the rng state for
+    scenario index ``i+1`` is unrelated to index ``i``; otherwise
+    adjacent scenarios would share a near-identical seed and could
+    accidentally pull near-identical draw sequences.
+    """
+    h = hashlib.sha256(f"{SEED}:{scen.index}:{scen.kind}".encode("utf-8")).digest()
+    return random.Random(int.from_bytes(h[:8], "big"))
 
 
 @dataclass(frozen=True)
@@ -631,7 +655,6 @@ def main() -> None:
     args = parser.parse_args()
 
     args.out.mkdir(parents=True, exist_ok=True)
-    rng = random.Random(SEED)
 
     targets = (
         [scen for scen in SCENARIOS if scen.index == args.only]
@@ -642,7 +665,11 @@ def main() -> None:
         raise SystemExit(f"No scenario with index {args.only}")
 
     for scen in targets:
-        path = write_scenario(scen, rng, args.out)
+        # Per-scenario sub-RNG so --only N produces byte-identical output
+        # to scenario N in a full run, and editing one scenario can't
+        # ripple into other scenarios' bytes via shared rng state.
+        # (Caught by Cursor bugbot on PR #2 commit 8de398d.)
+        path = write_scenario(scen, _rng_for_scenario(scen), args.out)
         n_lines = sum(1 for _ in path.open(encoding="utf-8"))
         print(f"wrote {path}  ({n_lines} lines, kind={scen.kind}, model={scen.model})")
 

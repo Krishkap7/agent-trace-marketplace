@@ -34,6 +34,7 @@ Determinism:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import random
 import uuid
@@ -44,6 +45,20 @@ from typing import Any
 OUT_DIR = Path(__file__).parent.parent / "data" / "raw" / "cursor"
 SEED = 20260511
 CURSOR_VERSION = "0.45.0"
+
+
+def _rng_for_scenario(scen: "Scenario") -> random.Random:
+    """Per-scenario deterministic RNG derived from ``(SEED, index, kind)``.
+
+    Guarantees that ``--only N`` produces byte-identical output to
+    scenario N in a full run, and that edits to scenario K don't
+    ripple into other scenarios' bytes. See the matching helper in
+    ``generate_synthetic_codex.py`` for the full rationale.
+    (Caught by Cursor bugbot on PR #2 commit 8de398d; bug existed in
+    both generators.)
+    """
+    h = hashlib.sha256(f"{SEED}:{scen.index}:{scen.kind}".encode("utf-8")).digest()
+    return random.Random(int.from_bytes(h[:8], "big"))
 
 
 @dataclass(frozen=True)
@@ -527,7 +542,6 @@ def main() -> None:
     args = parser.parse_args()
 
     args.out.mkdir(parents=True, exist_ok=True)
-    rng = random.Random(SEED)
 
     targets = (
         [scen for scen in SCENARIOS if scen.index == args.only]
@@ -538,8 +552,12 @@ def main() -> None:
         raise SystemExit(f"No scenario with index {args.only}")
 
     for scen in targets:
+        rng = _rng_for_scenario(scen)
         path = write_scenario(scen, rng, args.out)
-        n_msgs = len(build_envelope(scen, random.Random(SEED))["messages"])
+        # Count from the written file rather than re-building the
+        # envelope with a separate rng -- avoids double-draws and is
+        # consistent across the two generators.
+        n_msgs = len(json.loads(path.read_text(encoding="utf-8"))["messages"])
         print(
             f"wrote {path}  ({n_msgs} messages, kind={scen.kind}, model={scen.model})"
         )
