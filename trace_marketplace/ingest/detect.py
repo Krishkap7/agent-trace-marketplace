@@ -17,7 +17,13 @@ from typing import Literal
 
 log = logging.getLogger(__name__)
 
-FormatName = Literal["atif", "claude_code", "unknown"]
+FormatName = Literal["atif", "claude_code", "swe_agent", "unknown"]
+
+# Top-level keys every SWE-agent HF row carries (verified during slice 2.5
+# Step-0 inspection of nebius/SWE-agent-trajectories shard 0).
+SWE_AGENT_REQUIRED_KEYS: frozenset[str] = frozenset(
+    {"instance_id", "model_name", "target", "trajectory"}
+)
 
 # Event types we accept on the first non-empty line of a JSONL file when
 # classifying as Claude Code. Real Fleet data routinely starts with
@@ -72,6 +78,11 @@ def detect_format(path: Path) -> FormatName:
             log.debug("detect_format: %s not parseable as JSON: %s", path, exc)
             return "unknown"
         if isinstance(obj, dict):
+            # SWE-agent rows are pure JSON without a schema_version, so
+            # this branch must check first to avoid wrongly classifying
+            # them as "unknown".
+            if SWE_AGENT_REQUIRED_KEYS.issubset(obj.keys()):
+                return "swe_agent"
             schema_version = obj.get("schema_version")
             if isinstance(schema_version, str) and schema_version.startswith("ATIF"):
                 return "atif"
@@ -101,4 +112,9 @@ def detect_format(path: Path) -> FormatName:
     return "unknown"
 
 
-__all__ = ["FormatName", "detect_format", "CLAUDE_CODE_FIRST_EVENT_TYPES"]
+__all__ = [
+    "FormatName",
+    "detect_format",
+    "CLAUDE_CODE_FIRST_EVENT_TYPES",
+    "SWE_AGENT_REQUIRED_KEYS",
+]
