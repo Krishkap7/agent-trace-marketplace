@@ -2718,11 +2718,11 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "anthropic", specifier = ">=0.40.0" },
+    { name = "anthropic", specifier = ">=0.40.0,<1.0" },
     { name = "harbor", specifier = ">=0.6.6" },
     { name = "huggingface-hub", specifier = ">=0.24.0" },
     { name = "pyarrow", specifier = ">=15.0.0" },
-    { name = "streamlit", specifier = ">=1.40" },
+    { name = "streamlit", specifier = ">=1.40,<2.0" },
 ]
 
 [package.metadata.requires-dev]

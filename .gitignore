@@ -13,6 +13,11 @@ data/raw/*
 !data/raw/codex/
 !data/raw/cursor/
 data/*.db
+# Un-ignore the populated demo DB so the hosted Streamlit deploy at
+# share.streamlit.io can ship with real traces + labels baked in.
+# WAL / journal / shm files stay ignored (SQLite scratch, no business
+# being in version control).
+!data/marketplace.db
 data/*.db-journal
 data/*.db-wal
 data/*.db-shm
