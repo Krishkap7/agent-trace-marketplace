@@ -87,6 +87,22 @@ class ListFilters:
     max_steps: int | None = None
     search: str = ""
     """Case-insensitive substring; matches ``id`` / ``agent_name`` / ``model``."""
+    # Slice 10 filters -- complementary to ``has_error`` rather than
+    # mutually-exclusive with it, so we model them as separate flags
+    # the UI ANDs together. Three flags cover the three failure-mode
+    # discovery slices users actually browse for:
+    #
+    # * has_unrecovered_failures: "show me traces with at least one
+    #   wall the agent didn't escape" -- the primary failure-discovery
+    #   filter for the marketplace use case.
+    # * recovered_failures_only: "show me traces that hit a wall AND
+    #   escaped it" -- the recovery goldmine, where actionable
+    #   recovery summaries live.
+    # * clean_successes_only: "show me traces that just worked" --
+    #   useful for finding template traces / golden references.
+    has_unrecovered_failures: bool = False
+    recovered_failures_only: bool = False
+    clean_successes_only: bool = False
 
 
 def _build_where(filters: ListFilters) -> tuple[str, list[Any]]:
@@ -143,6 +159,29 @@ def _build_where(filters: ListFilters) -> tuple[str, list[Any]]:
         needle = f"%{filters.search}%"
         clauses.append("(id LIKE ? OR agent_name LIKE ? OR model LIKE ?)")
         params.extend([needle, needle, needle])
+
+    # Slice 10 filters. Each is an independent AND clause. JSON1's
+    # ``json_each`` returns the empty set on NULL inputs, so the
+    # EXISTS clause naturally filters out rows whose
+    # ``failure_events`` is still NULL (i.e. the events extractor
+    # hasn't run on them yet).
+    #
+    # The two compound clauses below are wrapped in parens defensively:
+    # AND-only joining makes them safe at the top level today, but the
+    # implicit contract of this builder is "each clauses entry is an
+    # atomic predicate". A future refactor that introduces OR at the
+    # outer level would silently produce wrong results without the
+    # parens. The pattern matches the search-needle compound on
+    # line 160 for consistency.
+    if filters.has_unrecovered_failures:
+        clauses.append(
+            "EXISTS (SELECT 1 FROM json_each(failure_events) "
+            "WHERE json_extract(value, '$.recovered') = 0)"
+        )
+    if filters.recovered_failures_only:
+        clauses.append("(has_error = 1 AND ultimately_succeeded = 1)")
+    if filters.clean_successes_only:
+        clauses.append("(has_error = 0 AND ultimately_succeeded = 1)")
 
     where_sql = " AND ".join(clauses) if clauses else "1=1"
     return where_sql, params
@@ -233,13 +272,21 @@ def get_trace(conn: sqlite3.Connection, trace_id: str) -> dict[str, Any] | None:
     its raw JSON string here so the caller can decide whether to decode
     it -- the detail view does, while the raw-blob fallback path does
     not have to.
+
+    Slice 10: also projects ``failure_events``,
+    ``recovered_recommendations``, ``failure_label_source``, and
+    ``ultimately_succeeded`` so the detail-view header can render the
+    outcome chip + events timeline + recoveries panel without a second
+    SELECT round-trip.
     """
     cur = conn.execute(
         """
         SELECT id, source_format, raw_blob, atif, ingested_at,
                agent_name, model, num_steps, num_tool_calls,
                has_error, failure_signals, failure_label,
-               failure_label_reasoning, embedding_id
+               failure_label_reasoning, embedding_id,
+               failure_events, recovered_recommendations,
+               failure_label_source, ultimately_succeeded
         FROM traces
         WHERE id = ?
         """,

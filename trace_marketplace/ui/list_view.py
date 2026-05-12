@@ -62,6 +62,10 @@ _FILTER_WIDGET_KEYS: tuple[str, ...] = (
     "_lv_models",
     "_lv_step_range",
     "_lv_has_atif",
+    # Slice 10 outcome-aware filters.
+    "_lv_has_unrecovered",
+    "_lv_recovered_only",
+    "_lv_clean_success",
 )
 """Explicit session_state keys for every sidebar filter widget so the
 empty-state 'Clear all filters' CTA can wipe them in one pass. Without
@@ -165,6 +169,38 @@ def _sidebar_filters(conn: sqlite3.Connection) -> ListFilters:
         format_func=lambda v: _HAS_ERROR_LABELS.get(v, v),
         key="_lv_has_error",
     )
+    # Slice 10: outcome-aware filters. Live *outside* the Advanced
+    # expander because finding failure-discovery / recovery-mode
+    # traces is the marketplace's headline use case.
+    has_unrecovered = st.sidebar.checkbox(
+        "Has unrecovered failures",
+        value=False,
+        help=(
+            "Show only traces with at least one failure event the agent "
+            "did NOT escape within the session. Requires the slice-10 "
+            "events extractor to have run."
+        ),
+        key="_lv_has_unrecovered",
+    )
+    recovered_only = st.sidebar.checkbox(
+        "Recovered failures only",
+        value=False,
+        help=(
+            "Show only failed traces (has_error=1) that ultimately "
+            "succeeded -- the goldmine of recovery summaries."
+        ),
+        key="_lv_recovered_only",
+    )
+    clean_success = st.sidebar.checkbox(
+        "Clean successes only",
+        value=False,
+        help=(
+            "Show only clean successes (has_error=0 AND "
+            "ultimately_succeeded=1) -- useful for finding golden "
+            "reference traces."
+        ),
+        key="_lv_clean_success",
+    )
     search = st.sidebar.text_input(
         "Search",
         value="",
@@ -226,6 +262,9 @@ def _sidebar_filters(conn: sqlite3.Connection) -> ListFilters:
         min_steps=min_steps,
         max_steps=max_steps,
         search=search.strip(),
+        has_unrecovered_failures=bool(has_unrecovered),
+        recovered_failures_only=bool(recovered_only),
+        clean_successes_only=bool(clean_success),
     )
 
 

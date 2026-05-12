@@ -232,6 +232,150 @@ _GLOBAL_CSS: str = """
     .tm-badge-warn  { color: #d4a574; border-color: rgba(212, 165, 116, 0.5); }
     .tm-badge-sim   { color: #d4a574; background: rgba(212, 165, 116, 0.12); }
 
+    /* Slice 10: outcome chip in the detail-view header. Five distinct
+       states drive five visual variants (success / recovered failure /
+       failed / subtle failure / unknown). The chip sits next to the
+       summary label caption so the user can read process vs. outcome
+       in one glance. */
+    .tm-outcome {
+        display: inline-block;
+        padding: 0.35rem 0.85rem;
+        border-radius: 999px;
+        font-family: "Iowan Old Style", "Palatino", Georgia, serif;
+        font-size: 1rem;
+        font-weight: 600;
+        letter-spacing: 0.005em;
+        border: 1px solid rgba(244, 235, 225, 0.15);
+        background: rgba(244, 235, 225, 0.05);
+        color: rgba(244, 235, 225, 0.9);
+        margin-right: 0.5rem;
+    }
+    .tm-outcome-success {
+        color: #b8d4ad; border-color: rgba(168, 201, 163, 0.5);
+        background: rgba(168, 201, 163, 0.10);
+    }
+    .tm-outcome-recovered {
+        color: #f0c47a; border-color: rgba(212, 165, 116, 0.55);
+        background: rgba(212, 165, 116, 0.13);
+    }
+    .tm-outcome-failed {
+        color: #f2a48e; border-color: rgba(232, 160, 142, 0.5);
+        background: rgba(232, 160, 142, 0.10);
+    }
+    .tm-outcome-subtle {
+        color: #c8b6e0; border-color: rgba(200, 182, 224, 0.5);
+        background: rgba(200, 182, 224, 0.10);
+    }
+    .tm-outcome-unknown {
+        color: rgba(244, 235, 225, 0.7);
+    }
+    .tm-outcome-caption {
+        color: rgba(244, 235, 225, 0.6);
+        font-size: 0.9rem;
+        margin-left: 0.2rem;
+    }
+
+    /* Slice 10: failure-events timeline. Each event is its own row;
+       recovered events get a muted accent + the summary quoted below;
+       unrecovered events get a brighter accent line so the user's eye
+       lands there first. */
+    .tm-events {
+        margin: 0.4rem 0 0.8rem 0;
+    }
+    .tm-event-row {
+        display: block;
+        padding: 0.55rem 0.8rem;
+        margin-bottom: 0.45rem;
+        border-left: 3px solid rgba(232, 160, 142, 0.8);
+        background: rgba(232, 160, 142, 0.06);
+        border-radius: 4px;
+    }
+    .tm-event-recovered {
+        border-left-color: rgba(212, 165, 116, 0.6);
+        background: rgba(212, 165, 116, 0.06);
+    }
+    .tm-event-label {
+        font-weight: 600;
+        color: #f4ebe1;
+        margin-right: 0.5rem;
+    }
+    .tm-event-range {
+        font-family: ui-monospace, "SF Mono", Menlo, monospace;
+        font-size: 0.85rem;
+        color: rgba(244, 235, 225, 0.7);
+    }
+    .tm-event-status {
+        font-size: 0.85rem;
+        color: rgba(244, 235, 225, 0.55);
+    }
+    .tm-event-status-recovered { color: #f0c47a; }
+    .tm-event-summary {
+        margin-top: 0.3rem;
+        margin-left: 0.5rem;
+        padding-left: 0.6rem;
+        border-left: 2px solid rgba(244, 235, 225, 0.15);
+        font-style: italic;
+        color: rgba(244, 235, 225, 0.85);
+    }
+
+    /* Slice 10: recoveries panel rendered for has_error=1 traces with
+       populated recommendations. Tighter card variant of the directory
+       row -- title (linked trace id) on top, recovery summaries quoted
+       below. */
+    .tm-recpanel-head {
+        font-family: "Iowan Old Style", "Palatino", Georgia, serif;
+        font-size: 1.15rem;
+        font-weight: 600;
+        margin: 0.4rem 0 0.6rem 0;
+        color: #f4ebe1;
+    }
+    .tm-rec-row {
+        display: block;
+        padding: 0.65rem 0.95rem;
+        margin-bottom: 0.5rem;
+        border: 1px solid rgba(244, 235, 225, 0.10);
+        border-radius: 8px;
+        background: rgba(58, 42, 30, 0.42);
+        color: inherit;
+        text-decoration: none;
+        transition: border-color 120ms ease, background 120ms ease;
+    }
+    .tm-rec-row:hover {
+        border-color: rgba(212, 165, 116, 0.45);
+        background: rgba(58, 42, 30, 0.7);
+    }
+    .tm-rec-head {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 0.8rem;
+        margin-bottom: 0.25rem;
+    }
+    .tm-rec-id {
+        font-family: ui-monospace, "SF Mono", Menlo, monospace;
+        font-size: 0.85rem;
+        color: #f4ebe1;
+        word-break: break-all;
+    }
+    .tm-rec-meta {
+        font-size: 0.82rem;
+        color: rgba(244, 235, 225, 0.65);
+        white-space: nowrap;
+    }
+    .tm-rec-blurb {
+        font-size: 0.85rem;
+        color: rgba(244, 235, 225, 0.7);
+        margin-bottom: 0.35rem;
+    }
+    .tm-rec-quote {
+        margin: 0.25rem 0 0.25rem 0.5rem;
+        padding-left: 0.6rem;
+        border-left: 2px solid rgba(212, 165, 116, 0.35);
+        font-style: italic;
+        color: rgba(244, 235, 225, 0.88);
+        font-size: 0.92rem;
+    }
+
     /* Caption / muted helper text -- bump from Streamlit's 0.875rem
        default so it stays readable at the bigger base font. */
     [data-testid="stCaptionContainer"] { font-size: 0.95rem; }
@@ -655,12 +799,67 @@ def render_step(step: dict[str, Any], index: int) -> None:
             _body()
 
 
+_OUTCOME_VARIANTS: dict[tuple[int | None, int | None], tuple[str, str, str]] = {
+    # (has_error, ultimately_succeeded) -> (css_class, glyph, label)
+    (0, 1): ("tm-outcome-success", "\u2713", "Success"),
+    (1, 1): ("tm-outcome-recovered", "\u26a1", "Recovered failure"),
+    (1, 0): ("tm-outcome-failed", "\u2717", "Failed"),
+    # The interesting cell: process said "clean" (no rules fired) but
+    # the outcome column says otherwise. Surface explicitly so the
+    # operator can spot rule misses rather than burying it in "Unknown".
+    (0, 0): ("tm-outcome-subtle", "\u26a0", "Subtle failure"),
+}
+"""(has_error, ultimately_succeeded) -> outcome chip variant. Anything
+not in this map renders as the neutral "Unknown" variant -- that's the
+fall-through for NULLs in either column."""
+
+
+def _render_outcome_chip(trace_row: dict[str, Any]) -> None:
+    """Render the slice-10 outcome chip + summary label caption.
+
+    Single chip with one of 5 variants:
+
+    * Success            (has_error=0, ultimately_succeeded=1)
+    * Recovered failure  (has_error=1, ultimately_succeeded=1)
+    * Failed             (has_error=1, ultimately_succeeded=0)
+    * Subtle failure     (has_error=0, ultimately_succeeded=0)
+    * Unknown            (NULL in either column)
+
+    The summary label caption sits to the right of the chip when
+    ``failure_label`` is populated, so the reader gets the one-word
+    summary (e.g. "hallucinated_api") without the chip having to
+    encode it.
+    """
+    has_error = trace_row.get("has_error")
+    succeeded = trace_row.get("ultimately_succeeded")
+    key = (
+        int(has_error) if has_error is not None else None,
+        int(succeeded) if succeeded is not None else None,
+    )
+    variant = _OUTCOME_VARIANTS.get(key)
+    if variant is None:
+        css_class, glyph, label = "tm-outcome-unknown", "\u003f", "Unknown"
+    else:
+        css_class, glyph, label = variant
+    failure_label = trace_row.get("failure_label")
+    caption = (
+        f'<span class="tm-outcome-caption">Summary: <code>{_escape(failure_label)}</code></span>'
+        if failure_label
+        else ""
+    )
+    st.markdown(
+        f'<div><span class="tm-outcome {css_class}">{glyph} {label}</span>'
+        f"{caption}</div>",
+        unsafe_allow_html=True,
+    )
+
+
 def render_header(trace_row: dict[str, Any]) -> None:
     """Render the trace-detail header strip.
 
     Shows the primary key (copy-friendly via ``st.code``), source format,
-    agent/model badges, failure flags, and the ingest timestamp. Pure
-    presentation; never queries SQL.
+    agent/model badges, the slice-10 outcome chip, and the ingest
+    timestamp. Pure presentation; never queries SQL.
     """
     st.subheader(f"Trace {trace_row.get('id', '?')}")
     st.code(trace_row.get("id", ""), language=None)
@@ -677,18 +876,7 @@ def render_header(trace_row: dict[str, Any]) -> None:
     for col, (k, v) in zip(cols, badges, strict=False):
         col.metric(label=k, value=str(v if v is not None else "-"))
 
-    failure_bits: list[str] = []
-    has_error = trace_row.get("has_error")
-    if has_error == 1:
-        failure_bits.append(":red[Labelled FAILURE (`has_error=1`)]")
-    elif has_error == 0:
-        failure_bits.append(":green[Labelled SUCCESS (`has_error=0`)]")
-    else:
-        failure_bits.append(":gray[Outcome label: unknown (`has_error IS NULL`)]")
-    failure_label = trace_row.get("failure_label")
-    if failure_label:
-        failure_bits.append(f"Failure label: `{failure_label}`")
-    st.markdown("  \n".join(failure_bits))
+    _render_outcome_chip(trace_row)
 
     # Slice 4 LLM-judge reasoning. Promoted from a quiet caption to a
     # full st.info() callout so the reasoning -- the whole point of the
@@ -697,6 +885,7 @@ def render_header(trace_row: dict[str, Any]) -> None:
     # reasoning is long; ``icon=":material/psychology:"`` reads as
     # "this is a model's interpretation" without needing words.
     reasoning = trace_row.get("failure_label_reasoning")
+    has_error = trace_row.get("has_error")
     if isinstance(reasoning, str) and reasoning.strip():
         st.info(
             f"**Judge reasoning** (Sonnet 4.6)\n\n> {reasoning.strip()}",
@@ -713,6 +902,179 @@ def render_header(trace_row: dict[str, Any]) -> None:
             "(seed 42) were sent to Sonnet 4.6 -- this row wasn't "
             "in the sample. Re-run `scripts/judge_failures.py` with a "
             "larger sample rate to include it."
+        )
+
+
+_EVENT_LABEL_GLYPHS: dict[str, str] = {
+    "loop": "\U0001f501",
+    "tool_spamming": "\U0001f4a5",
+    "gave_up": "\U0001f3f3",
+    "incomplete": "\u23f8",
+    "wrong_approach": "\U0001f9ed",
+    "hallucinated_api": "\U0001f47b",
+    "misread_error": "\U0001f50d",
+    "environment_issue": "\U0001f527",
+    "success": "\u2713",
+    "partial_success": "\u00bd",
+    "unclear": "\u003f",
+}
+"""Per-label glyph for the failure-events timeline. Falls back to a
+generic warning triangle for unknown labels."""
+
+
+def _render_one_event(event: dict[str, Any]) -> None:
+    label = event.get("label") or "unknown"
+    glyph = _EVENT_LABEL_GLYPHS.get(label, "\u26a0")
+    step_start = event.get("step_start")
+    step_end = event.get("step_end")
+    if isinstance(step_start, int) and isinstance(step_end, int):
+        if step_start == step_end:
+            range_str = f"step {step_start}"
+        else:
+            range_str = f"steps {step_start}-{step_end}"
+    else:
+        range_str = "step ?"
+    recovered = bool(event.get("recovered"))
+    row_classes = "tm-event-row"
+    if recovered:
+        row_classes += " tm-event-recovered"
+        recovery_step = event.get("recovery_step")
+        if isinstance(recovery_step, int):
+            status_html = (
+                f'<span class="tm-event-status tm-event-status-recovered">'
+                f"recovered at step {recovery_step}</span>"
+            )
+        else:
+            status_html = (
+                '<span class="tm-event-status tm-event-status-recovered">'
+                "recovered</span>"
+            )
+    else:
+        status_html = '<span class="tm-event-status">not recovered</span>'
+
+    summary_html = ""
+    summary = event.get("recovery_summary")
+    if recovered and isinstance(summary, str) and summary.strip():
+        summary_html = f'<div class="tm-event-summary">{_escape(summary.strip())}</div>'
+
+    st.markdown(
+        f'<div class="{row_classes}">'
+        f'<span class="tm-event-label">{glyph} {_escape(label)}</span>'
+        f'<span class="tm-event-range">{_escape(range_str)}</span>'
+        f"&nbsp;&middot;&nbsp;{status_html}"
+        f"{summary_html}"
+        f"</div>",
+        unsafe_allow_html=True,
+    )
+
+
+def render_failure_events_timeline(events_blob: str | None) -> None:
+    """Render the slice-10 failure-events timeline.
+
+    ``events_blob`` is the raw JSON string from the
+    ``traces.failure_events`` column (or ``None`` when the extractor
+    hasn't run yet). The renderer hides itself entirely on:
+
+    * NULL / empty input,
+    * malformed JSON,
+    * empty events list (legitimate "clean trace" output).
+
+    The detail view doesn't need to special-case any of these branches;
+    it just calls this function unconditionally for every trace.
+    """
+    if not events_blob:
+        return
+    try:
+        events = json.loads(events_blob)
+    except json.JSONDecodeError:
+        return
+    if not isinstance(events, list) or not events:
+        return
+    st.markdown(
+        '<div class="tm-recpanel-head">Failure events</div>',
+        unsafe_allow_html=True,
+    )
+    for event in events:
+        if isinstance(event, dict):
+            _render_one_event(event)
+
+
+def render_recovered_recommendations_panel(
+    trace_row: dict[str, Any],
+) -> None:
+    """Render the slice-10 "Recoveries from similar failures" panel.
+
+    Reads the pre-computed ``recovered_recommendations`` JSON column.
+    Renders only when:
+
+    * the trace itself failed (``has_error = 1``), AND
+    * the column is populated with a non-empty list.
+
+    Each row is a single ``<a>`` element so the whole card is one click
+    target (mirroring the directory-card affordance from the list
+    view). The card surfaces the matched trace's recovered events as
+    quoted recovery summaries -- the concrete actionable advice users
+    visit this panel to read.
+    """
+    if trace_row.get("has_error") != 1:
+        return
+    blob = trace_row.get("recovered_recommendations")
+    if not blob:
+        return
+    try:
+        recs = json.loads(blob)
+    except json.JSONDecodeError:
+        return
+    if not isinstance(recs, list) or not recs:
+        return
+
+    st.markdown(
+        f'<div class="tm-recpanel-head">'
+        f"\U0001f4a1 Recoveries from similar failures "
+        f"({len(recs)} trace{'s' if len(recs) != 1 else ''} hit similar "
+        f"walls and got out)</div>",
+        unsafe_allow_html=True,
+    )
+    for rec in recs:
+        if not isinstance(rec, dict):
+            continue
+        hit_id = rec.get("trace_id")
+        if not isinstance(hit_id, str):
+            continue
+        similarity = rec.get("similarity")
+        sim_str = (
+            f"similarity {float(similarity):.2f}"
+            if isinstance(similarity, (int, float))
+            else ""
+        )
+        source = rec.get("source_format") or ""
+        agent = rec.get("agent_name") or ""
+        meta_bits = " &middot; ".join(b for b in (sim_str, source, agent) if b)
+        recoveries = rec.get("recoveries") or []
+        recoveries = [r for r in recoveries if isinstance(r, dict)]
+        if not recoveries:
+            continue
+        blurb_text = (
+            f"Hit similar issue, recovered ({len(recoveries)} events):"
+            if len(recoveries) > 1
+            else "Hit similar issue, recovered:"
+        )
+        quotes_html = "".join(
+            f'<div class="tm-rec-quote">{_escape(r.get("summary") or "")}</div>'
+            for r in recoveries
+            if r.get("summary")
+        )
+        href = f"?trace_id={quote(str(hit_id), safe='')}"
+        st.markdown(
+            f'<a class="tm-rec-row" href="{href}" target="_self">'
+            f'<div class="tm-rec-head">'
+            f'<span class="tm-rec-id">{_escape(hit_id)}</span>'
+            f'<span class="tm-rec-meta">{meta_bits}</span>'
+            f"</div>"
+            f'<div class="tm-rec-blurb">{blurb_text}</div>'
+            f"{quotes_html}"
+            f"</a>",
+            unsafe_allow_html=True,
         )
 
 
@@ -736,8 +1098,10 @@ __all__ = [
     "extract_task_title",
     "inject_global_styles",
     "render_directory_row",
+    "render_failure_events_timeline",
     "render_filters_summary",
     "render_header",
+    "render_recovered_recommendations_panel",
     "render_step",
     "render_top_nav",
 ]
