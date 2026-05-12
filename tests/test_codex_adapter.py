@@ -150,6 +150,110 @@ def test_reasoning_summary_legacy_plain_string_form_extracted(
     assert "legacy reasoning" in (agent_steps[0].reasoning_content or "").lower()
 
 
+def test_reasoning_encrypted_content_only_surfaces_as_placeholder(
+    adapter: CodexAdapter,
+) -> None:
+    """Real reasoning-enabled gpt-5.5 sessions emit
+    ``summary=[], content=None, encrypted_content="<base64>"`` -- the
+    human-readable trace is withheld by OpenAI for IP reasons but the
+    fact that reasoning happened is still meaningful. A previous
+    summary-only extractor returned None on this shape, silently
+    dropping the "reasoning happened here" signal for every agent
+    step downstream of an encrypted reasoning block.
+
+    Bug discovered when ingesting a real rollout-*.jsonl from a
+    browser-exported Codex session; 2 reasoning events in the file
+    produced 0 reasoning-attached agent steps."""
+    encrypted_blob = "x" * 1100  # production blobs are ~1.1 KB base64
+    payload = "\n".join(
+        [
+            json.dumps(
+                {
+                    "type": "session_meta",
+                    "payload": {"id": "rs-encrypted", "cli_version": "0.32.0"},
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "reasoning",
+                        "summary": [],
+                        "content": None,
+                        "encrypted_content": encrypted_blob,
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"text": "ack"}],
+                    },
+                }
+            ),
+        ]
+    )
+    traj = adapter.to_atif(payload)
+    assert traj is not None
+    agent_steps = [s for s in traj.steps if s.source == "agent"]
+    assert len(agent_steps) == 1
+    rc = agent_steps[0].reasoning_content
+    assert rc is not None and rc, (
+        "encrypted-only reasoning silently dropped -- "
+        "regression of the real-data ingest bug"
+    )
+    assert "encrypted reasoning" in rc.lower()
+    assert "1100" in rc, "byte count should be surfaced in the placeholder"
+
+
+def test_reasoning_prefers_summary_over_encrypted_content_when_both_present(
+    adapter: CodexAdapter,
+) -> None:
+    """If a reasoning event has BOTH a non-empty summary AND
+    encrypted_content (uncommon but theoretically possible), the
+    human-readable summary wins -- losing real text in favour of an
+    opaque placeholder would be strictly worse."""
+    payload = "\n".join(
+        [
+            json.dumps(
+                {
+                    "type": "session_meta",
+                    "payload": {"id": "rs-both", "cli_version": "0.32.0"},
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "reasoning",
+                        "summary": [{"type": "summary_text", "text": "real plan"}],
+                        "encrypted_content": "x" * 500,
+                    },
+                }
+            ),
+            json.dumps(
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"text": "ack"}],
+                    },
+                }
+            ),
+        ]
+    )
+    traj = adapter.to_atif(payload)
+    assert traj is not None
+    agent_steps = [s for s in traj.steps if s.source == "agent"]
+    rc = agent_steps[0].reasoning_content or ""
+    assert "real plan" in rc.lower()
+    assert "encrypted reasoning" not in rc.lower()
+
+
 def test_synthetic_failure_mode_propagates_to_trajectory_extra(
     adapter: CodexAdapter,
 ) -> None:

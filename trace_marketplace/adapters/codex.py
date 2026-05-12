@@ -139,31 +139,65 @@ def _extract_message_text(content: Any) -> str:
     return "".join(parts)
 
 
-def _extract_reasoning_summary(summary: Any) -> str | None:
-    """Join a reasoning event's ``summary`` field into one string.
+def _extract_reasoning_from_payload(payload: dict[str, Any]) -> str | None:
+    """Distill a Codex ``response_item.payload`` of type ``reasoning`` into
+    a single string we can attach as the next agent step's
+    ``reasoning_content``.
 
-    Real Codex emits the OpenAI Responses-API canonical block form:
+    Real Codex emits three shapes worth handling:
 
-        "summary": [{"type": "summary_text", "text": "..."}]
+    1. **Canonical block form** (current Responses-API):
+       ``"summary": [{"type": "summary_text", "text": "..."}]``
+    2. **Plain-string form** (older / synthetic generators):
+       ``"summary": ["..."]``
+    3. **Encrypted-only form** (production reasoning models with the
+       summary withheld for IP reasons):
+       ``"summary": [], "content": null, "encrypted_content": "<base64>"``
 
-    Older / simplified emitters sometimes use a plain list of strings
-    (``["..."]``). We accept both so the adapter doesn't silently drop
-    reasoning on real production sessions just because the wire shape
-    is the canonical one.
+    Shape #3 was discovered when ingesting a real ``rollout-*.jsonl``
+    from a reasoning-enabled gpt-5.5 session: every reasoning event had
+    an empty summary plus ~1100 bytes of opaque ``encrypted_content``.
+    The previous summary-only extractor returned ``None`` for these,
+    so every agent step downstream of an encrypted reasoning block
+    silently lost the "reasoning happened here" signal. That's lossy
+    enough to mislead failure-mode search: a trajectory that DID reason
+    but encrypted it would be indistinguishable from one that didn't
+    reason at all.
+
+    Fix: when summary text is empty but ``encrypted_content`` is
+    present, return a structured placeholder marking the event:
+
+        "[encrypted reasoning, {N} bytes]"
+
+    The placeholder is short, unambiguous, and won't pollute BM25
+    search for the same reasons "[image]" placeholders don't pollute
+    HTML search. Full opaque ciphertext stays in ``raw_blob`` for
+    forensics; the silver column only needs the marker.
     """
-    if not isinstance(summary, list) or not summary:
-        return None
+    summary = payload.get("summary")
     parts: list[str] = []
-    for entry in summary:
-        if isinstance(entry, str) and entry:
-            parts.append(entry)
-        elif isinstance(entry, dict):
-            text = entry.get("text")
-            if isinstance(text, str) and text:
-                parts.append(text)
-    if not parts:
-        return None
-    return "\n".join(parts)
+    if isinstance(summary, list):
+        for entry in summary:
+            if isinstance(entry, str) and entry:
+                parts.append(entry)
+            elif isinstance(entry, dict):
+                text = entry.get("text")
+                if isinstance(text, str) and text:
+                    parts.append(text)
+    if parts:
+        return "\n".join(parts)
+    encrypted = payload.get("encrypted_content")
+    if isinstance(encrypted, str) and encrypted:
+        return f"[encrypted reasoning, {len(encrypted)} bytes]"
+    return None
+
+
+# Kept for backwards compatibility with code/tests that imported the
+# original summary-only helper. Delegates to the payload-aware version
+# above with a synthetic payload so behaviour stays consistent.
+def _extract_reasoning_summary(summary: Any) -> str | None:
+    """Legacy entry point. Prefer :func:`_extract_reasoning_from_payload`."""
+    return _extract_reasoning_from_payload({"summary": summary})
 
 
 def _parse_function_arguments(raw: Any) -> tuple[dict[str, Any], Any]:
@@ -362,7 +396,7 @@ class CodexAdapter(BaseAdapter):
             timestamp = event.get("timestamp")
 
             if ptype == "reasoning":
-                pending_reasoning = _extract_reasoning_summary(payload.get("summary"))
+                pending_reasoning = _extract_reasoning_from_payload(payload)
                 continue
 
             if ptype == "message":
