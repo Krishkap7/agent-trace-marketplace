@@ -48,6 +48,22 @@ def main() -> int:
             FROM traces
             """
         ).fetchall()
+        # Pulled separately so the json_extract cost is paid once.
+        # Synthetic generators set ``trajectory.extra.synthetic_failure_mode``
+        # on each failing fixture; this view is the ground-truth label
+        # set against which slice 3 failure-mode search can be evaluated.
+        fm_rows = conn.execute(
+            """
+            SELECT
+                source_format,
+                json_extract(atif, '$.extra.synthetic_failure_mode') AS fm,
+                count(*) AS n
+            FROM traces
+            WHERE json_extract(atif, '$.extra.synthetic_failure_mode') IS NOT NULL
+            GROUP BY source_format, fm
+            ORDER BY source_format, fm
+            """
+        ).fetchall()
 
     if not rows:
         print("traces table is empty.")
@@ -83,6 +99,12 @@ def main() -> int:
         one = c.get("1", 0)
         null = c.get("NULL", 0)
         print(f"  {fmt:12s}  {zero:>11d}  {one:>11d}  {null:>6d}")
+
+    if fm_rows:
+        _print_section("Synthetic failure-mode ground truth")
+        print(f"  {'source_format':12s}  {'synthetic_failure_mode':26s}  {'count':>5s}")
+        for row in fm_rows:
+            print(f"  {row['source_format']:12s}  {row['fm']:26s}  {row['n']:>5d}")
 
     _print_section("Model x outcome (per source_format)")
     for fmt in sorted(model_by_fmt.keys()):
