@@ -78,8 +78,19 @@ def _looks_like_cursor_envelope(obj: dict) -> bool:
 
 
 def _first_non_empty_line(path: Path, max_bytes: int = 200_000) -> str | None:
-    """Return the first non-empty line of ``path``, or ``None``."""
-    with path.open("r", encoding="utf-8", errors="replace") as fh:
+    """Return the first non-empty line of ``path``, or ``None``.
+
+    Returns ``None`` (not raises) on any I/O failure -- missing file,
+    permission denied, is-a-directory -- so callers preserve the
+    "never raises" contract documented on :func:`detect_format`.
+    Logs at DEBUG so the failure is still observable in verbose runs.
+    """
+    try:
+        fh = path.open("r", encoding="utf-8", errors="replace")
+    except OSError as exc:
+        log.debug("_first_non_empty_line: %s not openable: %s", path, exc)
+        return None
+    try:
         read = 0
         for line in fh:
             read += len(line)
@@ -88,6 +99,11 @@ def _first_non_empty_line(path: Path, max_bytes: int = 200_000) -> str | None:
                 return stripped
             if read >= max_bytes:
                 break
+    except OSError as exc:
+        log.debug("_first_non_empty_line: %s read error: %s", path, exc)
+        return None
+    finally:
+        fh.close()
     return None
 
 

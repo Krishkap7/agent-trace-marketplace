@@ -332,3 +332,30 @@ def test_does_not_raise_on_nonexistent_path(tmp_path: Path) -> None:
     # Either returns "unknown" or raises FileNotFoundError -- spec says
     # "never raises". Pin behaviour: detect_format swallows OS errors.
     assert detect_format(p) == "unknown"
+
+
+def test_does_not_raise_on_nonexistent_jsonl_path(tmp_path: Path) -> None:
+    """Regression for bugbot finding on PR #2: the .jsonl branch was
+    missing OSError handling around _first_non_empty_line, so missing
+    JSONL files raised FileNotFoundError instead of returning
+    'unknown'. The .json branch had been correctly wrapped; this test
+    pins the symmetric behaviour for .jsonl."""
+    p = tmp_path / "does_not_exist.jsonl"
+    assert detect_format(p) == "unknown"
+
+
+def test_does_not_raise_when_jsonl_path_is_a_directory(tmp_path: Path) -> None:
+    """``path.open()`` on a directory raises IsADirectoryError (a
+    subclass of OSError). detect_format must swallow it like any
+    other I/O failure."""
+    dir_with_jsonl_suffix = tmp_path / "wat.jsonl"
+    dir_with_jsonl_suffix.mkdir()
+    assert detect_format(dir_with_jsonl_suffix) == "unknown"
+
+
+def test_does_not_raise_when_json_path_is_a_directory(tmp_path: Path) -> None:
+    """Symmetric check for the .json branch -- already worked, but
+    pin it so a future refactor can't regress one without the other."""
+    dir_with_json_suffix = tmp_path / "wat.json"
+    dir_with_json_suffix.mkdir()
+    assert detect_format(dir_with_json_suffix) == "unknown"
