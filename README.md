@@ -4,7 +4,9 @@ A failure-mode search engine for coding-agent traces. See [trace-marketplace-con
 
 ## Status
 
-**Slice 3 (current):** Streamlit UI viewer. Filterable, paginated list view + URL-linkable detail view that renders the ATIF as a readable conversation thread (italic reasoning, encrypted-reasoning badge, collapsible tool calls / observations). Falls back to raw blob for `atif IS NULL` traces. SQL helpers live in `trace_marketplace/ui/queries.py` and are unit-tested without Streamlit.
+**Slice 4 (current):** Failure-detection enrichment. Deterministic rule pass (`scripts/detect_failures.py`) populates a new `failure_signals` JSON column and fills `has_error` for unlabelled traces; `scripts/validate_detection.py` benchmarks the rules against SWE-agent ground truth (precision ~0.78, recall ~0.48 aggregate, full table in [data/validation_report.md](data/validation_report.md)). LLM judge (`scripts/judge_failures.py`, Sonnet 4.6) classifies each flagged + sampled trace into an 11-way `FailureLabel` enum plus a one-sentence justification. Both passes are idempotent.
+
+**Slice 3:** Streamlit UI viewer. Filterable, paginated list view + URL-linkable detail view that renders the ATIF as a readable conversation thread (italic reasoning, encrypted-reasoning badge, collapsible tool calls / observations). Falls back to raw blob for `atif IS NULL` traces. SQL helpers live in `trace_marketplace/ui/queries.py` and are unit-tested without Streamlit.
 
 **Slice 2.6:** Codex (OpenAI `~/.codex/sessions/*.jsonl` rollouts) and Cursor (project-defined v1 export envelope) adapters. Both ship with deterministic synthetic-fixture generators (4 success / 3 failure / 2 short / 1 long per format) plus 6 named ground-truth failure modes (`hallucinated_api`, `infinite_retry_loop`, `ignored_test_failure`, `broke_working_code`, `wrong_file_edited`, `premature_conclusion`) propagated into `trajectory.extra.synthetic_failure_mode` for downstream search evaluation.
 
@@ -58,6 +60,30 @@ End-to-end output should show 5 ATIF + 2 Claude Code + 500 SWE-agent + 10 Codex 
 
 For Claude Code ingest, drop session JSONL files into `data/raw/claude_code/` (these come from `~/.claude/projects/<dir>/<uuid>.jsonl` on a real install). Codex sessions live under `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`; point `scripts/ingest_codex.py --raw-dir` at that directory to ingest real Codex rollouts. Cursor v1 envelope files use the `*.cursor.json` extension and follow the spec in `trace_marketplace/adapters/cursor.py`. All three real-data directories are gitignored.
 
+## Enrich failures (slice 4)
+
+Two passes turn the raw `traces` table into a queryable failure-mode index:
+
+```bash
+# Pass 1: deterministic rule-based signals (free, ~1 s for 500+ traces).
+uv run python scripts/detect_failures.py            # writes failure_signals
+uv run python scripts/detect_failures.py --force    # recompute after threshold tweaks
+
+# Validate against SWE-agent ground truth (writes data/validation_report.md):
+uv run python scripts/validate_detection.py
+
+# Pass 2: LLM judge (Sonnet 4.6, ~$5 for ~280 calls).
+export ANTHROPIC_API_KEY=sk-ant-...
+uv run python scripts/judge_failures.py --dry-run   # ALWAYS check expected count + cost first
+uv run python scripts/judge_failures.py             # real run; <$10 hard cap built in
+```
+
+`detect_failures.py` populates a new `failure_signals` JSON column (`{"loop": true, "ended_on_error": false, ...}`) and fills `has_error` from the aggregate "any signal fired" only when it was previously NULL (`COALESCE` preserves SWE-agent's `target`-derived ground truth).
+
+`judge_failures.py` selects every `has_error = 1` row plus a deterministic 10% sample of `has_error = 0` rows (seed 42), calls Sonnet 4.6 via the Anthropic SDK's structured tool-use feature so the JSON response is enum-validated, and writes the chosen `FailureLabel` + a one-sentence reasoning. The script is idempotent (skips traces that already have `failure_label`), respects a `--max-spend-usd` hard cap, and refuses to start without `ANTHROPIC_API_KEY` in the environment.
+
+The 11 failure labels live in [`trace_marketplace/enrich/failure_taxonomy.py`](trace_marketplace/enrich/failure_taxonomy.py); add a label there and its description gets fed verbatim into the next judge prompt with no other changes.
+
 ## View the marketplace
 
 After ingest, launch the Streamlit viewer:
@@ -103,6 +129,11 @@ trace_marketplace/
   storage/
     db.py                  # SQLite schema + insert helper
 trace_marketplace/
+  enrich/
+    __init__.py
+    failure_taxonomy.py    # FailureLabel enum + descriptions (judge prompt source)
+    failure_rules.py       # 5 pure signal_* fns + compute_signals aggregator
+    failure_judge.py       # Anthropic SDK wrapper; tool-use structured output
   ui/
     __init__.py
     app.py                 # 30-line router; reads st.query_params["trace_id"]
@@ -123,6 +154,9 @@ scripts/
   verify.py                     # SELECT + pretty-print + format/has_error breakdown
   breakdown.py                  # success/failure + synthetic failure-mode counts
   inspect_trace.py              # one-trace detail view
+  detect_failures.py            # slice 4: rule-based failure signal pass
+  validate_detection.py         # slice 4: precision/recall vs SWE-agent ground truth
+  judge_failures.py             # slice 4: LLM-judge pass (Sonnet 4.6)
   run_ui.sh                     # bash wrapper around `uv run streamlit run`
 tests/
   fixtures/
