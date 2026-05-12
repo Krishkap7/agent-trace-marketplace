@@ -189,12 +189,18 @@ def render_header(trace_row: dict[str, Any]) -> None:
         failure_bits.append(f"Failure label: `{failure_label}`")
     st.markdown("  \n".join(failure_bits))
 
-    # Slice 4 LLM-judge reasoning. Rendered as a caption rather than a
-    # quote block so it visually sits *underneath* the label badge and
-    # doesn't compete with the conversation thread below.
+    # Slice 4 LLM-judge reasoning. Promoted from a quiet caption to a
+    # full st.info() callout so the reasoning -- the whole point of the
+    # judge pass -- doesn't get visually buried below the metric row.
+    # Title-line + blockquote keeps the callout scannable even when the
+    # reasoning is long; ``icon=":material/psychology:"`` reads as
+    # "this is a model's interpretation" without needing words.
     reasoning = trace_row.get("failure_label_reasoning")
     if isinstance(reasoning, str) and reasoning.strip():
-        st.caption(f"_Judge:_ {reasoning.strip()}")
+        st.info(
+            f"**Judge reasoning** (Sonnet 4.6)\n\n> {reasoning.strip()}",
+            icon=":material/psychology:",
+        )
 
 
 def render_filters_summary(counts: dict[str, int]) -> None:
