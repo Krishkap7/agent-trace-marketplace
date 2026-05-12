@@ -1,13 +1,13 @@
 """SELECT and pretty-print the ``traces`` table.
 
-The whole point of slice 1 is to demonstrate end-to-end that ``raw_blob`` and
-``atif`` are populated for real trajectories. This script prints a one-row
-summary table plus a separator showing that both blob columns have non-zero
-length for every row.
+Originally a slice-1 sanity check (raw_blob/atif populated). Now also
+surfaces the ``has_error`` column added in slice 2.5 and prints a
+source-format breakdown.
 
 Run:
     uv run python scripts/verify.py
-    uv run python scripts/verify.py --show-json <trace_id>   # dump the ATIF for one row
+    uv run python scripts/verify.py --limit 50              # cap table rows
+    uv run python scripts/verify.py --show-json <trace_id>  # dump ATIF for one row
 """
 
 from __future__ import annotations
@@ -26,11 +26,12 @@ from trace_marketplace.storage.db import (
 
 COLUMNS: tuple[tuple[str, int, str], ...] = (
     ("id", 38, "<"),
-    ("source_format", 6, "<"),
-    ("agent_name", 10, "<"),
-    ("model", 18, "<"),
+    ("source_format", 11, "<"),
+    ("agent_name", 11, "<"),
+    ("model", 22, "<"),
     ("num_steps", 9, ">"),
     ("num_tool_calls", 14, ">"),
+    ("has_error", 9, ">"),
     ("raw_blob_len", 12, ">"),
     ("atif_len", 9, ">"),
 )
@@ -41,13 +42,16 @@ def _fmt_cell(value: object, width: int, align: str) -> str:
     return f"{text:{align}{width}}"
 
 
-def _print_table(rows: list[dict]) -> None:
+def _print_table(rows: list[dict], *, limit: int | None) -> None:
     header = " | ".join(_fmt_cell(name, w, a) for name, w, a in COLUMNS)
     sep = "-+-".join("-" * w for _, w, _ in COLUMNS)
     print(header)
     print(sep)
-    for row in rows:
+    visible = rows if limit is None else rows[:limit]
+    for row in visible:
         print(" | ".join(_fmt_cell(row.get(name), w, a) for name, w, a in COLUMNS))
+    if limit is not None and len(rows) > limit:
+        print(f"... {len(rows) - limit} more row(s) hidden (use --limit to see more)")
 
 
 def _print_health(rows: list[dict]) -> int:
@@ -64,6 +68,22 @@ def _print_health(rows: list[dict]) -> int:
     print(f"\n{total} row(s) total")
     print(f"  raw_blob populated: {raw_ok}/{total}")
     print(f"  atif populated:     {atif_ok}/{total}")
+
+    fmt_counts: dict[str, int] = {}
+    for r in rows:
+        f = r.get("source_format") or "<null>"
+        fmt_counts[f] = fmt_counts.get(f, 0) + 1
+    print("\nsource_format breakdown:")
+    for fmt, cnt in sorted(fmt_counts.items()):
+        print(f"  {cnt:5d}  {fmt}")
+
+    he_counts: dict[str, int] = {}
+    for r in rows:
+        key = "NULL" if r.get("has_error") is None else str(r["has_error"])
+        he_counts[key] = he_counts.get(key, 0) + 1
+    print("\nhas_error breakdown:")
+    for key in sorted(he_counts, key=lambda k: (k == "NULL", k)):
+        print(f"  {he_counts[key]:5d}  {key}")
 
     if raw_ok < total:
         print("ERROR: some rows have empty raw_blob.", file=sys.stderr)
@@ -118,7 +138,14 @@ def main() -> int:
         metavar="TRACE_ID",
         help="Instead of the summary table, show the parsed ATIF metadata for one trace.",
     )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=20,
+        help="Max table rows to print (default: 20). Use 0 for all.",
+    )
     args = parser.parse_args()
+    table_limit = None if args.limit == 0 else args.limit
 
     if not args.db.exists():
         print(
@@ -138,7 +165,7 @@ def main() -> int:
         print(f"ERROR: {exc}. The traces table may not exist yet.", file=sys.stderr)
         return 1
 
-    _print_table(rows)
+    _print_table(rows, limit=table_limit)
     return _print_health(rows)
 
 

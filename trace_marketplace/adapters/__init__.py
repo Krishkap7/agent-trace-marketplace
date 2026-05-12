@@ -12,11 +12,13 @@ from trace_marketplace.adapters.atif import ATIFAdapter
 from trace_marketplace.adapters.base import BaseAdapter
 from trace_marketplace.adapters.claude_code import ClaudeCodeAdapter
 from trace_marketplace.adapters.cursor import CursorAdapter
+from trace_marketplace.adapters.swe_agent import SWEAgentAdapter
 
 ADAPTERS: dict[str, BaseAdapter] = {
     "atif": ATIFAdapter(),
     "claude_code": ClaudeCodeAdapter(),
     "cursor": CursorAdapter(),
+    "swe_agent": SWEAgentAdapter(),
 }
 
 __all__ = [
@@ -25,4 +27,5 @@ __all__ = [
     "BaseAdapter",
     "ClaudeCodeAdapter",
     "CursorAdapter",
+    "SWEAgentAdapter",
 ]

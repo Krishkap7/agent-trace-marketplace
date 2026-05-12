@@ -2440,6 +2440,7 @@ source = { editable = "." }
 dependencies = [
     { name = "harbor" },
     { name = "huggingface-hub" },
+    { name = "pyarrow" },
 ]
 
 [package.dev-dependencies]
@@ -2452,6 +2453,7 @@ dev = [
 requires-dist = [
     { name = "harbor", specifier = ">=0.6.6" },
     { name = "huggingface-hub", specifier = ">=0.24.0" },
+    { name = "pyarrow", specifier = ">=15.0.0" },
 ]
 
 [package.metadata.requires-dev]

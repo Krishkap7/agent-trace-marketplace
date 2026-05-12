@@ -47,6 +47,61 @@ def test_malformed_json_returns_unknown(tmp_path: Path) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# SWE-agent (.json with the four required keys) detection
+# --------------------------------------------------------------------------- #
+
+
+def test_detects_swe_agent_row(tmp_path: Path) -> None:
+    p = _write(
+        tmp_path / "row.json",
+        json.dumps(
+            {
+                "instance_id": "AnalogJ__lexicon-336",
+                "model_name": "swe-agent-llama-70b",
+                "target": False,
+                "trajectory": [{"role": "system", "system_prompt": "x", "text": ""}],
+                "exit_status": "submitted",
+            }
+        ),
+    )
+    assert detect_format(p) == "swe_agent"
+
+
+def test_swe_agent_takes_precedence_over_atif_keys(tmp_path: Path) -> None:
+    """If a .json file somehow has BOTH schema_version AND the SWE-agent
+    keys, the SWE-agent check fires first. (Defensive; shouldn't occur in
+    real corpora, but pinning the precedence so a future regression is
+    obvious.)"""
+    p = _write(
+        tmp_path / "weird.json",
+        json.dumps(
+            {
+                "schema_version": "ATIF-v1.7",
+                "instance_id": "x",
+                "model_name": "y",
+                "target": True,
+                "trajectory": [],
+            }
+        ),
+    )
+    assert detect_format(p) == "swe_agent"
+
+
+def test_atif_still_detected_when_swe_agent_keys_partial(tmp_path: Path) -> None:
+    p = _write(
+        tmp_path / "atif.json",
+        json.dumps(
+            {
+                "schema_version": "ATIF-v1.7",
+                "instance_id": "x",  # only one of the four SWE-agent keys
+                "steps": [],
+            }
+        ),
+    )
+    assert detect_format(p) == "atif"
+
+
+# --------------------------------------------------------------------------- #
 # Claude Code (.jsonl) detection
 # --------------------------------------------------------------------------- #
 

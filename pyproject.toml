@@ -6,6 +6,7 @@ requires-python = ">=3.12"
 dependencies = [
     "harbor>=0.6.6",
     "huggingface-hub>=0.24.0",
+    "pyarrow>=15.0.0",
 ]
 
 [build-system]
