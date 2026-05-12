@@ -53,7 +53,12 @@ def _sidebar_filters(conn: sqlite3.Connection) -> ListFilters:
     """
     st.sidebar.header("Filters")
     counts = trace_counts(conn)
-    render_filters_summary(counts)
+    # render_filters_summary uses bare ``st.markdown`` (so callers can
+    # render it anywhere they like), but we want it pinned to the
+    # sidebar -- wrap it in the sidebar context so the call lands
+    # alongside the filter widgets, not in the main body.
+    with st.sidebar:
+        render_filters_summary(counts)
     st.sidebar.divider()
 
     source_formats = tuple(
