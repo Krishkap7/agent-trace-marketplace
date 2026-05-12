@@ -346,7 +346,17 @@ _GLOBAL_CSS: str = """
         margin: 0.4rem 0 0.6rem 0;
         color: #f4ebe1;
     }
-    .tm-rec-row {
+    /* Selectors all use the ``a.tm-rec-row`` (element + class) prefix
+       on purpose: Streamlit's base styles include
+       ``.element-container a { text-decoration: underline }`` at
+       specificity 0,2,0, which silently beats a plain ``.tm-rec-row``
+       rule and bleeds the anchor underline into every nested span/
+       div. Mirroring the ``a.tm-row`` pattern that the directory
+       cards already use puts us back at 0,1,1 plus an explicit
+       descendant override for belt-and-braces against future
+       Streamlit CSS bumps. */
+    a.tm-rec-row,
+    a.tm-rec-row:visited {
         display: block;
         padding: 0.65rem 0.95rem;
         margin-bottom: 0.5rem;
@@ -357,34 +367,42 @@ _GLOBAL_CSS: str = """
         text-decoration: none;
         transition: border-color 120ms ease, background 120ms ease;
     }
-    .tm-rec-row:hover {
+    a.tm-rec-row:hover {
         border-color: rgba(212, 165, 116, 0.45);
         background: rgba(58, 42, 30, 0.7);
+        text-decoration: none;
     }
-    .tm-rec-head {
+    a.tm-rec-row *,
+    a.tm-rec-row:hover * {
+        text-decoration: none;
+    }
+    a.tm-rec-row .tm-rec-head {
         display: flex;
         align-items: baseline;
         justify-content: space-between;
         gap: 0.8rem;
-        margin-bottom: 0.25rem;
+        margin-bottom: 0.35rem;
     }
-    .tm-rec-id {
+    a.tm-rec-row .tm-rec-id {
         font-family: ui-monospace, "SF Mono", Menlo, monospace;
         font-size: 0.85rem;
         color: #f4ebe1;
         word-break: break-all;
     }
-    .tm-rec-meta {
+    a.tm-rec-row .tm-rec-meta {
         font-size: 0.82rem;
         color: rgba(244, 235, 225, 0.65);
         white-space: nowrap;
+        flex-shrink: 0;
     }
-    .tm-rec-blurb {
+    a.tm-rec-row .tm-rec-blurb {
+        display: block;
         font-size: 0.85rem;
         color: rgba(244, 235, 225, 0.7);
-        margin-bottom: 0.35rem;
+        margin: 0.35rem 0;
     }
-    .tm-rec-quote {
+    a.tm-rec-row .tm-rec-quote {
+        display: block;
         margin: 0.25rem 0 0.25rem 0.5rem;
         padding-left: 0.6rem;
         border-left: 2px solid rgba(212, 165, 116, 0.35);
