@@ -289,13 +289,16 @@ def _project_cost(specs: list[TraceSpec]) -> dict[str, Any]:
     n_first_per_format = len(set(s.output_format for s in specs))
     n_cached_calls = max(0, n - n_first_per_format)
 
-    cache_write = n_first_per_format * _DRYRUN_INPUT_TOKENS_PER_TRACE_FIRST
+    # Split each request into "cached portion" (3500 tokens of the
+    # system prompt that benefits from prompt-caching) and "live
+    # portion" (~1000 tokens of per-trace brief that always pays the
+    # base-input rate). First-call-per-format pays the cache-write
+    # premium on the cached portion; subsequent calls get the
+    # discounted cache-read rate on it.
+    per_call_live = _DRYRUN_INPUT_TOKENS_PER_TRACE_FIRST - _DRYRUN_CACHE_READ_TOKENS
+    cache_write = n_first_per_format * _DRYRUN_CACHE_READ_TOKENS
     cache_read = n_cached_calls * _DRYRUN_CACHE_READ_TOKENS
-    base_input = (
-        n_first_per_format * (_DRYRUN_INPUT_TOKENS_PER_TRACE_FIRST - _DRYRUN_CACHE_READ_TOKENS)
-        + n_cached_calls
-        * (_DRYRUN_INPUT_TOKENS_PER_TRACE_FIRST - _DRYRUN_CACHE_READ_TOKENS)
-    )
+    base_input = n * per_call_live
     output_tokens = int(n * _DRYRUN_OUTPUT_TOKENS_PER_TRACE * 1.1)  # +10% retries
 
     cost_usd = (
