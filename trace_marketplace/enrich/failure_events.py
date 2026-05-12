@@ -459,21 +459,32 @@ def _validate_event(item: Any) -> FailureEvent | None:
     recovery_step = item.get("recovery_step")
     recovery_summary = item.get("recovery_summary")
     if recovered:
-        if not isinstance(recovery_step, int) or recovery_step < step_start:
+        # Recovery must happen at or after the last failing step --
+        # ``step_end`` is the boundary case where the recovery action
+        # coincides with the closing step of the failure span; any
+        # value inside the span (or before it) is semantically
+        # inconsistent because the failure hasn't ended yet. Empirically
+        # Opus 4.7 emits ``recovery_step > step_end`` ~95% of the time
+        # with the remaining ~5% landing on ``recovery_step == step_end``
+        # (recovery action on the last failing step); we accept both.
+        # Anything stricter is too inside the window and indicates a
+        # misformed event -- reject so the caller retries.
+        if not isinstance(recovery_step, int) or recovery_step < step_end:
             return None
         if not isinstance(recovery_summary, str) or not recovery_summary.strip():
             return None
     else:
-        # Non-recovered: both fields must be null. Tolerate the model
-        # emitting empty-string summary when recovered=false; coerce it
-        # to None so downstream code only has one shape to handle.
-        if recovery_step is not None and not isinstance(recovery_step, int):
-            return None
+        # Non-recovered events: both fields must be null per the tool
+        # schema contract. We coerce unconditionally instead of
+        # rejecting on stray values -- a single off-spec field
+        # shouldn't cost a retry. Empty-string recovery_summary is a
+        # known Opus 4.7 quirk; a non-empty summary with
+        # ``recovered=false`` is a model-confusion case we silently
+        # drop because the recovered=false signal is the authoritative
+        # one (we'd render a "not recovered" event with summary text
+        # otherwise, which is contradictory in the UI).
         recovery_step = None
-        if isinstance(recovery_summary, str) and not recovery_summary.strip():
-            recovery_summary = None
-        if recovery_summary is not None and not isinstance(recovery_summary, str):
-            return None
+        recovery_summary = None
     return FailureEvent(
         label=label,
         step_start=int(step_start),

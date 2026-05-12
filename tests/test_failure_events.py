@@ -426,3 +426,145 @@ def test_failure_event_to_dict_round_trip() -> None:
         "recovery_step": 9,
         "recovery_summary": "Used Read to verify the API surface.",
     }
+
+
+# ---------- _validate_event boundary semantics ----------
+#
+# Regression guards from Cursor Bugbot on PR #13:
+#
+# 1. recovery_step must be at or after step_end. A recovery_step in the
+#    middle of the failure window (step_start <= rs < step_end) is
+#    semantically inconsistent -- the failure hasn't ended yet -- and
+#    must be rejected so the caller retries.
+# 2. For recovered=false events, both ``recovery_step`` and
+#    ``recovery_summary`` must end up None on the validated record,
+#    regardless of what the model emitted, so downstream code (UI
+#    rendering, JSON storage, derive_ultimately_succeeded) sees one
+#    canonical shape.
+#
+# We exercise both via the top-level ``extract_events`` path so the
+# validation chain (Anthropic tool-use parsing -> ``_validate_event``
+# -> retry) is hit end-to-end, not just the helper in isolation.
+
+
+def _events_payload(*events: dict[str, Any]) -> dict[str, Any]:
+    return {"events": list(events)}
+
+
+def test_validate_event_accepts_recovery_step_at_step_end_boundary() -> None:
+    """``recovery_step == step_end`` is the legitimate edge case where
+    the agent recovered on the last failing step (Opus 4.7 emits this
+    ~5% of the time in our live corpus). Must pass validation."""
+    payload = _events_payload(
+        {
+            "label": "misread_error",
+            "step_start": 7,
+            "step_end": 11,
+            "recovered": True,
+            "recovery_step": 11,  # boundary: == step_end
+            "recovery_summary": "Re-read the traceback's chained cause.",
+        }
+    )
+    client = _make_client([_response(_tool_use_block(input_payload=payload))])
+    result = extract_events(_TRIVIAL_TRAJ, client=client)
+    assert len(result.events) == 1
+    assert result.events[0].recovery_step == 11
+
+
+def test_validate_event_rejects_recovery_step_inside_failure_window() -> None:
+    """``step_start <= recovery_step < step_end`` is contradictory --
+    recovery can't happen while the failure is still ongoing. Caller
+    must retry once on the schema failure, then raise."""
+    bad_payload = _events_payload(
+        {
+            "label": "loop",
+            "step_start": 3,
+            "step_end": 10,
+            "recovered": True,
+            "recovery_step": 5,  # squarely inside the failure window
+            "recovery_summary": "Should never validate.",
+        }
+    )
+    # Retry returns the same broken payload, so extract_events should
+    # raise after the single retry budget is exhausted.
+    client = _make_client(
+        [
+            _response(_tool_use_block(input_payload=bad_payload)),
+            _response(_tool_use_block(input_payload=bad_payload)),
+        ]
+    )
+    with pytest.raises(EventsExtractionError):
+        extract_events(_TRIVIAL_TRAJ, client=client)
+
+
+def test_validate_event_rejects_recovery_step_before_step_start() -> None:
+    """``recovery_step < step_start`` is also nonsensical; same rejection
+    path as the inside-window case."""
+    bad_payload = _events_payload(
+        {
+            "label": "loop",
+            "step_start": 8,
+            "step_end": 12,
+            "recovered": True,
+            "recovery_step": 4,  # before the failure even started
+            "recovery_summary": "Time-travel recovery.",
+        }
+    )
+    client = _make_client(
+        [
+            _response(_tool_use_block(input_payload=bad_payload)),
+            _response(_tool_use_block(input_payload=bad_payload)),
+        ]
+    )
+    with pytest.raises(EventsExtractionError):
+        extract_events(_TRIVIAL_TRAJ, client=client)
+
+
+def test_validate_event_nulls_recovery_summary_when_not_recovered() -> None:
+    """When ``recovered=false`` the validator must coerce
+    ``recovery_summary`` to None even if the model emitted a non-empty
+    string -- otherwise the UI would render a "not recovered" event
+    with a recovery summary, which is contradictory. Symmetric with
+    how ``recovery_step`` is already nulled in this branch."""
+    payload = _events_payload(
+        {
+            "label": "gave_up",
+            "step_start": 5,
+            "step_end": 9,
+            "recovered": False,
+            "recovery_step": 12,  # stray non-null int, must be coerced
+            # Stray non-empty string -- previously this slipped through
+            # unchanged, leaving the event with recovered=false plus an
+            # actual summary. Must now be coerced to None.
+            "recovery_summary": "model leaked text here despite recovered=false",
+        }
+    )
+    client = _make_client([_response(_tool_use_block(input_payload=payload))])
+    result = extract_events(_TRIVIAL_TRAJ, client=client)
+    assert len(result.events) == 1
+    event = result.events[0]
+    assert event.recovered is False
+    assert event.recovery_step is None
+    assert event.recovery_summary is None
+
+
+def test_validate_event_nulls_empty_string_recovery_summary_when_not_recovered() -> (
+    None
+):
+    """The known Opus 4.7 quirk: recovered=false + recovery_summary=""
+    (empty string). Previously coerced to None as a special case; the
+    new unconditional null still produces the same result."""
+    payload = _events_payload(
+        {
+            "label": "incomplete",
+            "step_start": 4,
+            "step_end": 6,
+            "recovered": False,
+            "recovery_step": None,
+            "recovery_summary": "",
+        }
+    )
+    client = _make_client([_response(_tool_use_block(input_payload=payload))])
+    result = extract_events(_TRIVIAL_TRAJ, client=client)
+    assert len(result.events) == 1
+    assert result.events[0].recovery_summary is None
