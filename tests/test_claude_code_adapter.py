@@ -198,3 +198,194 @@ def test_empty_input_returns_none() -> None:
 def test_malformed_json_returns_none() -> None:
     """Garbage input should produce None, not an exception."""
     assert ClaudeCodeAdapter().to_atif("not json at all\n{also: bad}") is None
+
+
+# --------------------------------------------------------------------------- #
+# Real-data regressions discovered ingesting an actual session export
+# (data/raw/claude_code_real/*.jsonl). Each test pins one failure mode the
+# fixture-driven tests above didn't catch.
+# --------------------------------------------------------------------------- #
+
+
+import json as _json  # noqa: E402  (kept local so the import block above stays declarative)
+
+
+def _make_session(events: list[dict]) -> str:
+    return "\n".join(_json.dumps(e) for e in events)
+
+
+def test_ai_title_event_is_known_noise_not_unknown() -> None:
+    """``ai-title`` is Claude Code's async LLM-generated session title,
+    not a step. Previously logged as an unknown event type. Must now be
+    counted as drop-able metadata and surfaced through
+    ``trajectory.extra.ai_title_count`` (+ the title itself if present).
+    """
+    sid = "sess-ai-title"
+    payload = _make_session(
+        [
+            {"type": "permission-mode", "sessionId": sid, "permissionMode": "default"},
+            {
+                "type": "user",
+                "sessionId": sid,
+                "cwd": "/tmp",
+                "message": {"role": "user", "content": "hi"},
+            },
+            {"type": "ai-title", "sessionId": sid, "aiTitle": "Build a Flask app"},
+            {"type": "ai-title", "sessionId": sid, "aiTitle": "Build a Flask app"},
+        ]
+    )
+    traj = ClaudeCodeAdapter().to_atif(payload)
+    assert traj is not None
+    extra = traj.extra or {}
+    assert extra.get("ai_title_count") == 2
+    assert extra.get("ai_title") == "Build a Flask app"
+    assert "ai-title" not in (extra.get("unknown_event_counts") or {})
+
+
+def test_thinking_block_encrypted_signature_surfaces_as_placeholder() -> None:
+    """Extended-thinking mode emits ``{"type":"thinking", "thinking":"",
+    "signature":"<~250B base64>"}`` -- the human-readable trace is
+    withheld by Anthropic. Previously this whole shape was filtered
+    away (empty ``thinking`` field) so extended-thinking sessions
+    looked like the model never reasoned. Must now surface a
+    placeholder so the silver column reflects what happened.
+
+    Mirror of the Codex ``encrypted_content`` fix discovered the same
+    session running through a real rollout file."""
+    sid = "sess-encrypted-thinking"
+    payload = _make_session(
+        [
+            {"type": "permission-mode", "sessionId": sid, "permissionMode": "default"},
+            {
+                "type": "assistant",
+                "sessionId": sid,
+                "message": {
+                    "role": "assistant",
+                    "model": "claude-sonnet-4-6",
+                    "content": [
+                        {"type": "thinking", "thinking": "", "signature": "x" * 250},
+                        {"type": "text", "text": "Hi!"},
+                    ],
+                    "usage": {"input_tokens": 10, "output_tokens": 5},
+                },
+            },
+        ]
+    )
+    traj = ClaudeCodeAdapter().to_atif(payload)
+    assert traj is not None
+    agent_steps = [s for s in traj.steps if s.source == "agent"]
+    assert len(agent_steps) == 1
+    rc = agent_steps[0].reasoning_content or ""
+    assert "encrypted thinking" in rc.lower(), (
+        f"empty thinking+signature should produce a placeholder, got: {rc!r}"
+    )
+    assert "250" in rc, "signature byte count should be surfaced"
+
+
+def test_thinking_block_prefers_text_over_signature_placeholder() -> None:
+    """When a thinking block has BOTH human-readable text AND a
+    signature (theoretical but allowed by the schema), the text wins."""
+    sid = "sess-both"
+    payload = _make_session(
+        [
+            {"type": "permission-mode", "sessionId": sid, "permissionMode": "default"},
+            {
+                "type": "assistant",
+                "sessionId": sid,
+                "message": {
+                    "role": "assistant",
+                    "model": "claude-sonnet-4-6",
+                    "content": [
+                        {
+                            "type": "thinking",
+                            "thinking": "real plan",
+                            "signature": "x" * 100,
+                        },
+                        {"type": "text", "text": "ack"},
+                    ],
+                    "usage": {"input_tokens": 1, "output_tokens": 1},
+                },
+            },
+        ]
+    )
+    traj = ClaudeCodeAdapter().to_atif(payload)
+    assert traj is not None
+    rc = (traj.steps[-1].reasoning_content or "").lower()
+    assert "real plan" in rc
+    assert "encrypted thinking" not in rc
+
+
+def test_final_metrics_aggregated_across_assistant_usage_blocks() -> None:
+    """Claude Code attaches a fresh ``usage`` to every assistant event
+    rather than emitting standalone token_count events. Without an
+    aggregation pass, ``Trajectory.final_metrics`` was always None on
+    real sessions -- breaking parity with Codex/SWE-agent rows. Must
+    now sum input/output/cache_read/cache_creation across all
+    assistant turns."""
+    sid = "sess-metrics"
+    payload = _make_session(
+        [
+            {"type": "permission-mode", "sessionId": sid, "permissionMode": "default"},
+            {
+                "type": "assistant",
+                "sessionId": sid,
+                "message": {
+                    "role": "assistant",
+                    "model": "claude-sonnet-4-6",
+                    "content": [{"type": "text", "text": "first"}],
+                    "usage": {
+                        "input_tokens": 10,
+                        "output_tokens": 20,
+                        "cache_read_input_tokens": 100,
+                        "cache_creation_input_tokens": 50,
+                    },
+                },
+            },
+            {
+                "type": "assistant",
+                "sessionId": sid,
+                "message": {
+                    "role": "assistant",
+                    "model": "claude-sonnet-4-6",
+                    "content": [{"type": "text", "text": "second"}],
+                    "usage": {
+                        "input_tokens": 5,
+                        "output_tokens": 15,
+                        "cache_read_input_tokens": 200,
+                        "cache_creation_input_tokens": 0,
+                    },
+                },
+            },
+        ]
+    )
+    traj = ClaudeCodeAdapter().to_atif(payload)
+    assert traj is not None
+    fm = traj.final_metrics
+    assert fm is not None, (
+        "final_metrics must aggregate across per-event usage blocks"
+    )
+    assert fm.total_prompt_tokens == 15
+    assert fm.total_completion_tokens == 35
+    assert fm.total_cached_tokens == 300
+    extra = fm.extra or {}
+    assert extra.get("cache_creation_input_tokens") == 50
+
+
+def test_final_metrics_none_when_no_assistant_carries_usage() -> None:
+    """Don't fabricate a final_metrics block when no usage data exists --
+    keeping the field None signals "no token data available" honestly."""
+    sid = "sess-no-usage"
+    payload = _make_session(
+        [
+            {"type": "permission-mode", "sessionId": sid, "permissionMode": "default"},
+            {
+                "type": "user",
+                "sessionId": sid,
+                "cwd": "/tmp",
+                "message": {"role": "user", "content": "just a question"},
+            },
+        ]
+    )
+    traj = ClaudeCodeAdapter().to_atif(payload)
+    assert traj is not None
+    assert traj.final_metrics is None
