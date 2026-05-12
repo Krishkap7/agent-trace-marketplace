@@ -103,6 +103,51 @@ something empty or otherwise unusable (e.g. ``..`` / ``.`` / pure
 slashes). ``.bin`` keeps :func:`detect_format` on the unknown branch
 rather than mis-classifying a sanitised payload."""
 
+_DROPZONE_CSS: str = """
+<style>
+    /* Make Streamlit's stock file_uploader read as a big inviting
+       drop zone rather than a flat 80px-tall rectangle with a small
+       blue "Browse files" button. We target the public data-testid
+       selectors that Streamlit guarantees as stable widget API; the
+       streamlit>=1.40,<2.0 pin in pyproject.toml means these stay
+       valid for our deployment.
+
+       Three visual changes:
+
+       1. ``min-height: 220px`` + ``padding: 2.5rem`` makes the
+          drop-zone roughly 3x taller than the default, so dragging
+          a file from a Finder window has an obvious target.
+       2. Heavier dashed border + tinted background says "this is
+          where files go", not "this is some metadata strip".
+       3. Hover state gives interactive feedback so the user knows
+          the zone IS the drop target, not just decoration.
+
+       Scoped to the upload page (we only call _render_files_tab on
+       ?page=upload) so the list-view sidebar's filter widgets are
+       unaffected. */
+    [data-testid="stFileUploaderDropzone"] {
+        min-height: 220px;
+        padding: 2.5rem 2rem;
+        border: 2px dashed rgba(120, 130, 145, 0.55);
+        border-radius: 12px;
+        background: rgba(120, 130, 145, 0.06);
+        transition: background 120ms ease, border-color 120ms ease;
+    }
+    [data-testid="stFileUploaderDropzone"]:hover {
+        background: rgba(120, 130, 145, 0.14);
+        border-color: rgba(120, 130, 145, 0.9);
+    }
+    [data-testid="stFileUploaderDropzoneInstructions"],
+    [data-testid="stFileUploaderDropzoneInstructions"] span,
+    [data-testid="stFileUploaderDropzoneInstructions"] small {
+        font-size: 1.05rem;
+    }
+</style>
+"""
+"""Scoped CSS injected at the top of the files tab. Lifts the
+visibility of Streamlit's stock dropzone widget without forking it.
+See block-comment above for the rationale on each rule."""
+
 
 def _sanitise_upload_filename(raw: str) -> str:
     """Strip directory components and reject path-traversal payloads.
@@ -258,8 +303,9 @@ def _render_outcome(outcome: _UploadOutcome) -> None:
 
 def _render_files_tab(conn: sqlite3.Connection) -> None:
     """The drag-drop tab: multi-file upload + per-file result rendering."""
+    st.markdown(_DROPZONE_CSS, unsafe_allow_html=True)
     files = st.file_uploader(
-        "Drag-drop one or more trace files",
+        "Drop trace files here, or click to browse",
         accept_multiple_files=True,
         type=None,
         key="upload_files_widget",
