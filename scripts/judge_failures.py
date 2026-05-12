@@ -32,14 +32,19 @@ import logging
 import random
 import sqlite3
 import sys
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
+
+from anthropic import Anthropic
 
 from trace_marketplace.enrich.failure_judge import (
     INPUT_PRICE_PER_MTOK,
     JUDGE_MODEL,
     OUTPUT_PRICE_PER_MTOK,
     JudgeError,
+    JudgeResult,
     estimate_cost_usd,
     judge_trace,
     require_api_key,
@@ -58,6 +63,22 @@ invariant is the whole reason for sampling deterministically."""
 
 PROGRESS_EVERY: int = 25
 HARD_CAP_TRACES: int = 500
+
+DEFAULT_WORKERS: int = 8
+"""How many traces to judge in parallel by default.
+
+Eight is the empirically-derived sweet spot for the current corpus
+size: large enough to hide a single 529 retry burst (~6-8 s of dead
+time) behind other in-flight requests, small enough that we stay
+under Anthropic Tier-2 throughput caps with comfortable headroom.
+Power users can crank to 16-32 via ``--workers`` when the provider
+is healthy; the SDK and our own ``judge_trace`` are thread-safe."""
+
+MAX_WORKERS: int = 32
+"""Hard ceiling on ``--workers``. The judge tops out around this
+many threads even on the largest tier because each call already
+holds an HTTP connection -- past 32 we just buy contention without
+buying throughput."""
 """When the selection set exceeds this we make the user confirm
 interactively. Keeps a bug that 10x's the call count from spending
 $50 silently."""
@@ -118,6 +139,17 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             "this flag when the judge prompt or schema has changed and "
             "you want to refresh the persisted reasonings against the "
             "*same* set of traces that were judged on the previous run."
+        ),
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=DEFAULT_WORKERS,
+        help=(
+            f"Number of parallel judge calls. Defaults to "
+            f"{DEFAULT_WORKERS}; bumping to 16-32 cuts wall-clock "
+            f"~linearly when Anthropic is healthy. Capped at "
+            f"{MAX_WORKERS}."
         ),
     )
     return parser.parse_args(argv)
@@ -229,20 +261,75 @@ def _persist_one(
     )
 
 
+@dataclass(frozen=True)
+class _WorkerOutcome:
+    """Result of one ``_judge_one`` call. Either ``result`` is set
+    (happy path) or one of the error fields is. We classify the
+    error type in the worker so the main thread can preserve the
+    serial version's log-level distinction (``JudgeError`` -> warning,
+    everything else -> error)."""
+
+    row: _Row
+    result: JudgeResult | None = None
+    judge_error: JudgeError | None = None
+    bad_atif: bool = False
+    unexpected_error: Exception | None = None
+
+
+def _judge_one(row: _Row, *, client: Any) -> _WorkerOutcome:
+    """Worker body: pure compute + Anthropic I/O, no DB access.
+
+    Running in a ThreadPoolExecutor. SQLite would happily corrupt
+    itself across threads on a shared connection, so we deliberately
+    keep this side of the boundary read-only: parse ATIF, call the
+    judge, return everything the main thread needs to persist.
+    """
+    try:
+        traj = json.loads(row.atif)
+    except json.JSONDecodeError:
+        return _WorkerOutcome(row=row, bad_atif=True)
+    signals = _signals_dict(row)
+    try:
+        result = judge_trace(traj, signals, client=client)
+        return _WorkerOutcome(row=row, result=result)
+    except JudgeError as exc:
+        return _WorkerOutcome(row=row, judge_error=exc)
+    except Exception as exc:  # noqa: BLE001 -- network / SDK errors
+        return _WorkerOutcome(row=row, unexpected_error=exc)
+
+
 def _run_live(
     conn: sqlite3.Connection,
     targets: list[_Row],
     *,
     max_spend_usd: float,
     limit: int | None,
+    workers: int,
 ) -> int:
-    """Loop over ``targets``, call the judge for each, persist the
-    result. Respects ``max_spend_usd`` as a hard kill-switch and the
-    optional ``limit`` ceiling."""
+    """Judge ``targets`` in parallel, persist results on the main thread.
+
+    Concurrency model:
+
+    * Workers (``ThreadPoolExecutor``) call :func:`judge_trace` only.
+      The Anthropic SDK + httpx are thread-safe so we share one
+      ``Anthropic`` client across all workers (saves TLS handshakes).
+    * Main thread drains ``as_completed`` and is the *only* thread
+      that touches the SQLite connection. SQLite connections are not
+      thread-safe by default and we don't want to babysit a lock.
+    * Cost cap is enforced after each completed task. When we cross
+      the threshold we cancel still-pending futures and stop
+      collecting; already-running workers finish (Python can't
+      interrupt threads mid-flight), but their results are still
+      persisted to avoid wasting the API spend that already happened.
+    """
     require_api_key()
     if limit is not None:
         targets = targets[: max(0, int(limit))]
-    print(f"Judging {len(targets)} traces with {JUDGE_MODEL}...")
+    workers = max(1, min(int(workers), MAX_WORKERS, len(targets) or 1))
+    print(
+        f"Judging {len(targets)} traces with {JUDGE_MODEL} "
+        f"(workers={workers})..."
+    )
     print(f"Hard spend cap: ${max_spend_usd:.2f}")
 
     total_in = 0
@@ -250,47 +337,88 @@ def _run_live(
     successes = 0
     failures = 0
     aborted_for_cost = False
+    completed = 0
 
-    for idx, row in enumerate(targets, start=1):
+    shared_client = Anthropic()
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures: dict[Future[_WorkerOutcome], _Row] = {
+            pool.submit(_judge_one, row, client=shared_client): row
+            for row in targets
+        }
         try:
-            traj = json.loads(row.atif)
-        except json.JSONDecodeError:
-            log.warning("Trace %s has malformed ATIF; skipping", row.trace_id)
-            failures += 1
-            continue
-        signals = _signals_dict(row)
-        try:
-            result = judge_trace(traj, signals)
-        except JudgeError as exc:
-            log.warning("Judge failed for %s: %s", row.trace_id, exc)
-            failures += 1
-            continue
-        except Exception as exc:  # network / SDK errors
-            log.error("Unexpected error judging %s: %s", row.trace_id, exc)
-            failures += 1
-            continue
+            for fut in as_completed(futures):
+                completed += 1
+                outcome = fut.result()
+                row = outcome.row
 
-        _persist_one(conn, row.trace_id, result.label.value, result.reasoning)
-        conn.commit()
-        total_in += result.usage.get("input_tokens", 0)
-        total_out += result.usage.get("output_tokens", 0)
-        successes += 1
+                if outcome.bad_atif:
+                    log.warning(
+                        "Trace %s has malformed ATIF; skipping", row.trace_id
+                    )
+                    failures += 1
+                elif outcome.judge_error is not None:
+                    log.warning(
+                        "Judge failed for %s: %s",
+                        row.trace_id,
+                        outcome.judge_error,
+                    )
+                    failures += 1
+                elif outcome.unexpected_error is not None:
+                    log.error(
+                        "Unexpected error judging %s: %s",
+                        row.trace_id,
+                        outcome.unexpected_error,
+                    )
+                    failures += 1
+                else:
+                    assert outcome.result is not None  # noqa: S101
+                    _persist_one(
+                        conn,
+                        row.trace_id,
+                        outcome.result.label.value,
+                        outcome.result.reasoning,
+                    )
+                    conn.commit()
+                    total_in += outcome.result.usage.get("input_tokens", 0)
+                    total_out += outcome.result.usage.get("output_tokens", 0)
+                    successes += 1
 
-        if idx % PROGRESS_EVERY == 0 or idx == len(targets):
-            cost_so_far = estimate_cost_usd(total_in, total_out)
-            print(
-                f"  [{idx:>4}/{len(targets)}] tokens={total_in:>7}/{total_out:>5}  "
-                f"cost=${cost_so_far:.2f}"
-            )
+                if (
+                    completed % PROGRESS_EVERY == 0
+                    or completed == len(targets)
+                ):
+                    cost_so_far = estimate_cost_usd(total_in, total_out)
+                    print(
+                        f"  [{completed:>4}/{len(targets)}] "
+                        f"tokens={total_in:>7}/{total_out:>5}  "
+                        f"cost=${cost_so_far:.2f}"
+                    )
 
-        running_cost = estimate_cost_usd(total_in, total_out)
-        if running_cost >= max_spend_usd:
-            print(
-                f"\nABORTING: running spend ${running_cost:.2f} hit hard cap "
-                f"${max_spend_usd:.2f}. {idx}/{len(targets)} traces judged."
-            )
-            aborted_for_cost = True
-            break
+                running_cost = estimate_cost_usd(total_in, total_out)
+                if running_cost >= max_spend_usd:
+                    print(
+                        f"\nABORTING: running spend ${running_cost:.2f} "
+                        f"hit hard cap ${max_spend_usd:.2f}. "
+                        f"{completed}/{len(targets)} traces processed."
+                    )
+                    aborted_for_cost = True
+                    # Cancel pending futures so we don't keep spending.
+                    # Already-running workers finish (Python threads
+                    # can't be killed); their outcomes are silently
+                    # discarded by exiting the as_completed loop.
+                    for pending in futures:
+                        if not pending.done():
+                            pending.cancel()
+                    break
+        except KeyboardInterrupt:
+            # Ctrl-C: cancel queued futures, let in-flight ones drain
+            # quietly so the DB doesn't end up with half-written rows.
+            print("\nInterrupted; cancelling pending judge calls...")
+            for pending in futures:
+                if not pending.done():
+                    pending.cancel()
+            raise
 
     final_cost = estimate_cost_usd(total_in, total_out)
     print("=" * 60)
@@ -339,6 +467,7 @@ def main(argv: list[str] | None = None) -> int:
             targets,
             max_spend_usd=args.max_spend_usd,
             limit=args.limit,
+            workers=args.workers,
         )
 
 
