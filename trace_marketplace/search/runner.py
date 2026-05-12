@@ -256,7 +256,27 @@ def embed_and_recommend_similar(
             skipped_reason=f"Embedded OK but DB write failed: {exc}",
         )
 
-    hits = find_similar(conn, vector, exclude_ids=[trace_id], top_k=top_k)
+    try:
+        hits = find_similar(conn, vector, exclude_ids=[trace_id], top_k=top_k)
+    except Exception as exc:  # pragma: no cover -- defensive
+        # ``find_similar`` raises ValueError on dimension mismatch and
+        # can also surface DB / numpy errors from ``load_all_embeddings``
+        # (the corpus query) or ``np.stack`` (empty / oddly-shaped
+        # cache). The function docstring promises "never raises" and
+        # ``_process_upload`` in upload_view.py relies on that contract
+        # to skip a try/except at the call site -- if we let this
+        # propagate, the upload page crashes AFTER the trace was
+        # already successfully ingested and embedded. Capture it as a
+        # skipped_reason instead so the UI can show "embedded OK but
+        # couldn't fetch similar traces because X".
+        log.exception("find_similar failed for newly-embedded %s", trace_id)
+        return EmbedAndSimilarResult(
+            embedded=True,
+            similar=[],
+            skipped_reason=(
+                f"Embedded OK, but similar-trace lookup failed: {exc}"
+            ),
+        )
     return EmbedAndSimilarResult(embedded=True, similar=hits, skipped_reason=None)
 
 
@@ -283,12 +303,26 @@ def run_find_similar(
                 "`scripts/generate_embeddings.py` to populate it."
             ),
         )
-    hits = find_similar(
-        conn,
-        np.asarray(record.embedding, dtype=np.float32),
-        exclude_ids=[trace_id],
-        top_k=top_k,
-    )
+    try:
+        hits = find_similar(
+            conn,
+            np.asarray(record.embedding, dtype=np.float32),
+            exclude_ids=[trace_id],
+            top_k=top_k,
+        )
+    except Exception as exc:  # pragma: no cover -- defensive
+        # Mirror the contract on ``embed_and_recommend_similar``: a
+        # corrupt or dimension-mismatched cached vector shouldn't take
+        # down the detail panel's "Find similar" button. Surface the
+        # failure as a user-readable error string so the panel can
+        # render an inline message instead of a red traceback.
+        log.exception("find_similar failed for detail-view %s", trace_id)
+        return NLSearchResult(
+            parsed=None,
+            hits=[],
+            candidate_count=0,
+            error=f"Similar-trace lookup failed: {exc}",
+        )
     return NLSearchResult(parsed=None, hits=hits, candidate_count=len(hits), error=None)
 
 

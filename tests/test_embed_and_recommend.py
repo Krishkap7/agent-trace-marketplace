@@ -154,3 +154,57 @@ def test_unknown_trace_id_short_circuits(conn, monkeypatch):
     result = runner.embed_and_recommend_similar(conn, "nonexistent")
     assert result.embedded is False
     assert result.skipped_reason
+
+
+def test_find_similar_failure_does_not_propagate(conn, monkeypatch):
+    """Regression: cursor bot caught find_similar wasn't wrapped.
+
+    The never-raises contract is what upload_view._process_upload
+    relies on to omit its own try/except around this call. If
+    ``find_similar`` raises (dimension mismatch, numpy.stack on a
+    weird shape, sqlite blip in ``load_all_embeddings``) the upload
+    page must NOT crash -- the trace is already embedded, we just
+    can't rank neighbours.
+    """
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    _insert_trace(conn, "upload")
+    fake_vec = np.ones(EMBEDDING_DIM, dtype=np.float32)
+    monkeypatch.setattr(runner, "embed_text", lambda _text: fake_vec)
+
+    def _boom(*_args, **_kwargs):
+        raise ValueError("dimension mismatch: expected 1536, got 768")
+
+    monkeypatch.setattr(runner, "find_similar", _boom)
+
+    # MUST NOT RAISE.
+    result = runner.embed_and_recommend_similar(conn, "upload")
+    assert result.embedded is True  # Embedding succeeded.
+    assert result.similar == []
+    assert result.skipped_reason and "similar-trace lookup failed" in result.skipped_reason
+    # And the embedding WAS stored despite the ranking failure.
+    row = conn.execute(
+        "SELECT trace_id FROM trace_embeddings WHERE trace_id = ?", ("upload",)
+    ).fetchone()
+    assert row is not None
+
+
+def test_run_find_similar_failure_does_not_propagate(conn, monkeypatch):
+    """Same defensive contract on the detail-view sibling."""
+    _insert_trace(conn, "subject")
+    vec = np.ones(EMBEDDING_DIM, dtype=np.float32)
+    store_embedding(
+        conn,
+        trace_id="subject",
+        embedding=vec,
+        source_text_hash="h",
+        model=EMBEDDING_MODEL,
+    )
+
+    def _boom(*_args, **_kwargs):
+        raise ValueError("dimension mismatch")
+
+    monkeypatch.setattr(runner, "find_similar", _boom)
+
+    result = runner.run_find_similar(conn, "subject")
+    assert result.hits == []
+    assert result.error and "Similar-trace lookup failed" in result.error
