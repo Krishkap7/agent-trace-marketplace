@@ -522,18 +522,45 @@ def _web_search_line(rng: random.Random, query: str, minute: int) -> dict[str, A
 
 
 def _token_count_line(scen: Scenario, rng: random.Random) -> dict[str, Any]:
+    """Token-count event matching the canonical OpenAI Codex wire shape.
+
+    Mirrors ``TokenCountEvent { info: Option<TokenUsageInfo> }`` from
+    ``codex-rs/protocol/src/protocol.rs``, where ``TokenUsageInfo``
+    nests ``total_token_usage`` and ``last_token_usage`` (both
+    ``TokenUsage`` with the 5 *_tokens fields). An earlier version of
+    this generator put the per-field counts directly under ``info`` --
+    that's NOT what real Codex emits, and the adapter (correctly)
+    expects the nested form, so synthetic final_metrics silently
+    dropped. Caught by Cursor bugbot.
+    """
     input_tok, output_tok, total = scen.final_tokens
+    cached = int(input_tok * 0.1)
+    reasoning = int(output_tok * 0.3)
+    total_usage = {
+        "input_tokens": input_tok,
+        "cached_input_tokens": cached,
+        "output_tokens": output_tok,
+        "reasoning_output_tokens": reasoning,
+        "total_tokens": total,
+    }
+    # last_token_usage represents just the final turn -- synthetic data
+    # doesn't track per-turn breakdowns, so use a small fraction.
+    last_usage = {
+        "input_tokens": input_tok // 4,
+        "cached_input_tokens": cached // 4,
+        "output_tokens": output_tok // 4,
+        "reasoning_output_tokens": reasoning // 4,
+        "total_tokens": total // 4,
+    }
     return {
         "timestamp": _ts(rng, 5),
         "type": "event_msg",
         "payload": {
             "type": "token_count",
             "info": {
-                "input_tokens": input_tok,
-                "cached_input_tokens": int(input_tok * 0.1),
-                "output_tokens": output_tok,
-                "reasoning_output_tokens": int(output_tok * 0.3),
-                "total_tokens": total,
+                "total_token_usage": total_usage,
+                "last_token_usage": last_usage,
+                "model_context_window": 128_000,
             },
         },
     }
