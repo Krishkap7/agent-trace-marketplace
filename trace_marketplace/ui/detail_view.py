@@ -38,16 +38,6 @@ key includes the source trace id so navigating to a different detail
 page automatically invalidates."""
 
 
-def _back_to_list_link() -> None:
-    """Plain link button that clears ``?trace_id`` so the router lands
-    back on the list view. Using a button (not an ``st.markdown`` link)
-    means the click triggers a rerun in the same Streamlit session
-    rather than a hard browser navigation that loses state."""
-    if st.button("<- Back to list", key="detail_back"):
-        st.query_params.clear()
-        st.rerun()
-
-
 def _decode_atif(blob: str | None) -> dict[str, Any] | None:
     """Decode the ``atif`` column into a Python dict, or return None.
 
@@ -153,9 +143,13 @@ def _render_similar_panel(conn: sqlite3.Connection, trace_id: str) -> None:
 
 def render(conn: sqlite3.Connection, trace_id: str) -> None:
     """Render the detail view. ``app.py`` calls this when
-    ``?trace_id=...`` is present."""
-    _back_to_list_link()
+    ``?trace_id=...`` is present.
 
+    Navigation back to the list view is handled by the top nav strip
+    rendered above this view in :mod:`trace_marketplace.ui.app`; the
+    Browse anchor is a relative ``./`` link that lands cleanly without
+    a query-params clear-and-rerun dance.
+    """
     row = get_trace(conn, trace_id)
     if row is None:
         st.error(f"No trace found with id `{trace_id}`.")

@@ -27,9 +27,20 @@ LIST_COLUMNS: tuple[str, ...] = (
     "has_error",
     "failure_label",
     "ingested_at",
+    "atif",
 )
-"""Columns surfaced in the list view's dataframe. Order matters: it's
-the column order the dataframe renders in."""
+"""Columns projected into a list-view row.
+
+``atif`` is included so :func:`components.render_directory_row` can
+extract a human-readable task title from the first user step (or the
+first substantive system step for SWE-agent traces) instead of just
+showing the opaque trace_id UUID. Pagination caps the page at 100 rows
+so the wire cost stays bounded; SQLite's column projection of TEXT is
+in-process so there's no real network overhead.
+
+The slice 9 directory-card renderer doesn't depend on column order
+(unlike the old st.dataframe), so order here just controls SELECT
+projection."""
 
 DISTINCT_VALUE_COLUMNS: frozenset[str] = frozenset(
     {"source_format", "agent_name", "model", "failure_label"}

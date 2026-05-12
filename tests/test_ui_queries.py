@@ -104,8 +104,7 @@ def test_list_traces_has_atif_only(populated_db: sqlite3.Connection) -> None:
     # The __test_unknown__ row has atif IS NULL and must be excluded.
     assert total == 5
     for row in rows:
-        # ``atif`` isn't in LIST_COLUMNS, but every kept row must NOT be
-        # the unknown one.
+        # Every kept row must NOT be the unknown one (its atif is NULL).
         assert row["id"] != "__test_unknown__"
 
 

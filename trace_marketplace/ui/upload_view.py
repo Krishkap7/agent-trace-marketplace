@@ -132,19 +132,20 @@ _DROPZONE_CSS: str = """
     [data-testid="stFileUploaderDropzone"] {
         min-height: 220px;
         padding: 2.5rem 2rem;
-        border: 2px dashed rgba(120, 130, 145, 0.55);
+        border: 2px dashed rgba(212, 165, 116, 0.45);
         border-radius: 12px;
-        background: rgba(120, 130, 145, 0.06);
+        background: rgba(212, 165, 116, 0.04);
         transition: background 120ms ease, border-color 120ms ease;
     }
     [data-testid="stFileUploaderDropzone"]:hover {
-        background: rgba(120, 130, 145, 0.14);
-        border-color: rgba(120, 130, 145, 0.9);
+        background: rgba(212, 165, 116, 0.1);
+        border-color: rgba(212, 165, 116, 0.8);
     }
     [data-testid="stFileUploaderDropzoneInstructions"],
     [data-testid="stFileUploaderDropzoneInstructions"] span,
     [data-testid="stFileUploaderDropzoneInstructions"] small {
         font-size: 1.05rem;
+        color: #f4ebe1;
     }
 </style>
 """
@@ -460,11 +461,20 @@ def _render_paste_tab(conn: sqlite3.Connection) -> None:
 
 
 def render(conn: sqlite3.Connection) -> None:
-    """Render the upload page. ``app.py`` calls this when ``?page=upload``."""
+    """Render the upload page. ``app.py`` calls this when ``?page=upload``.
+
+    The top nav strip (Browse / Upload) is rendered by
+    :mod:`trace_marketplace.ui.app` before this view runs, so we don't
+    repeat the back-link CTA here. The long format-help text is tucked
+    behind an expander to keep the dropzone the focal point.
+    """
     st.title("Upload a trace")
-    st.markdown("[<- Back to all traces](?)")
-    st.caption(_FORMAT_HELP)
-    st.divider()
+    st.caption(
+        "Drop a session file below and it'll be ingested, classified, "
+        "and embedded for similarity search."
+    )
+    with st.expander("Which formats are supported?", expanded=False):
+        st.markdown(_FORMAT_HELP)
 
     tab_files, tab_paste = st.tabs(["Upload files", "Paste content"])
     with tab_files:
