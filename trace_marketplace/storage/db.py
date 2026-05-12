@@ -79,6 +79,7 @@ def insert_trace(
     model: str | None,
     num_steps: int | None,
     num_tool_calls: int | None,
+    has_error: int | None = None,
     ingested_at: str | None = None,
 ) -> None:
     """Insert (or replace) a single trace row.
@@ -86,6 +87,14 @@ def insert_trace(
     Uses ``INSERT OR REPLACE`` so re-running the ingest pipeline on the same
     source corpus is idempotent. The primary key is the trace's session/trace
     id, which is stable across re-ingestion.
+
+    ``has_error`` is the only "enrichment" column the pipeline populates at
+    ingest time. When the adapter sets ``trajectory.extra["resolved"]`` (a
+    bool), the pipeline derives ``has_error = int(not resolved)`` and passes
+    it here. Slice 2.5 wires this for SWE-agent traces, where ``target`` is
+    ground truth. Other adapters leave it None and the column stays NULL,
+    which slice 3's failure-detection pass will populate via structural
+    rules / LLM judges.
     """
     if ingested_at is None:
         ingested_at = datetime.now(timezone.utc).isoformat()
@@ -94,8 +103,8 @@ def insert_trace(
         """
         INSERT OR REPLACE INTO traces (
             id, source_format, raw_blob, atif, ingested_at,
-            agent_name, model, num_steps, num_tool_calls
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            agent_name, model, num_steps, num_tool_calls, has_error
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             trace_id,
@@ -107,6 +116,7 @@ def insert_trace(
             model,
             num_steps,
             num_tool_calls,
+            has_error,
         ),
     )
     conn.commit()
@@ -129,6 +139,7 @@ def fetch_all_summaries(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             model,
             num_steps,
             num_tool_calls,
+            has_error,
             length(raw_blob) AS raw_blob_len,
             length(atif)     AS atif_len,
             ingested_at

@@ -46,6 +46,27 @@ def redact(trajectory: Trajectory) -> Trajectory:
     return trajectory
 
 
+def _derive_has_error(trajectory: Trajectory) -> int | None:
+    """Translate ``trajectory.extra["resolved"]`` (bool) into the ``has_error`` column.
+
+    Generic plumbing so any adapter can opt in by writing a single key:
+
+        trajectory.extra["resolved"] = True   -> has_error = 0
+        trajectory.extra["resolved"] = False  -> has_error = 1
+        (key missing or non-bool)             -> has_error = None  (NULL)
+
+    The double negation (``resolved`` -> ``not resolved``) is awkward but
+    matches the existing column semantics: ``has_error=1`` means "this trace
+    is a failure," and benchmark datasets ground that in their own
+    success/failure label.
+    """
+    extra = trajectory.extra or {}
+    resolved = extra.get("resolved")
+    if isinstance(resolved, bool):
+        return int(not resolved)
+    return None
+
+
 def _trace_id_for(trajectory: Trajectory | None, path: Path) -> str:
     """Pick a stable primary key for the ``traces`` row.
 
@@ -102,12 +123,14 @@ def ingest_file(path: Path, conn: sqlite3.Connection) -> IngestResult:
         model = trajectory.agent.model_name
         num_steps = len(trajectory.steps)
         num_tool_calls = sum(len(s.tool_calls or []) for s in trajectory.steps)
+        has_error = _derive_has_error(trajectory)
     else:
         atif_text = None
         agent_name = None
         model = None
         num_steps = None
         num_tool_calls = None
+        has_error = None
 
     trace_id = _trace_id_for(trajectory, path)
 
@@ -121,6 +144,7 @@ def ingest_file(path: Path, conn: sqlite3.Connection) -> IngestResult:
         model=model,
         num_steps=num_steps,
         num_tool_calls=num_tool_calls,
+        has_error=has_error,
     )
 
     return IngestResult(
