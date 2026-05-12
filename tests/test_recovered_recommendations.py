@@ -31,6 +31,7 @@ from trace_marketplace.enrich.embeddings import (
 from trace_marketplace.enrich.recovered_recommendations import (
     compute_recommendations,
     count_qualifying_candidates,
+    persist_recommendations_for_trace,
     select_failed_target_ids,
 )
 from trace_marketplace.storage.db import connect, init_schema, insert_trace
@@ -319,3 +320,122 @@ def test_count_qualifying_candidates_returns_recovered_only(
     # (recovered=true present). hit_unrecovered is excluded (recovered=false
     # everywhere). src has no recovered events. hit_clean has no events.
     assert count_qualifying_candidates(seeded_db) == 3
+
+
+# ---------- persist_recommendations_for_trace ----------
+#
+# Single-trace upload-flow helper. The semantics that matter for the
+# upload UX:
+#
+# * has_error = 1     -> compute + persist + return list (possibly empty)
+# * has_error = 0     -> return None, column stays NULL
+# * has_error IS NULL -> return None, column stays NULL
+# * missing trace_id  -> return None, no crash
+#
+# When has_error = 1 we always WRITE to the column, even if the result is
+# empty -- that way the detail view can distinguish "computed but no
+# matches" from "never computed" and rendering stays predictable.
+
+
+def _read_recs_column(conn: sqlite3.Connection, trace_id: str) -> str | None:
+    row = conn.execute(
+        "SELECT recovered_recommendations FROM traces WHERE id = ?", (trace_id,)
+    ).fetchone()
+    return row["recovered_recommendations"] if row else None
+
+
+def test_persist_recommendations_for_failed_trace_writes_and_returns_list(
+    seeded_db: sqlite3.Connection,
+) -> None:
+    result = persist_recommendations_for_trace(seeded_db, "src")
+    assert isinstance(result, list)
+    assert len(result) >= 2  # hit_recovered_A + hit_recovered_B at minimum
+    ids = {rec["trace_id"] for rec in result}
+    assert "hit_recovered_A" in ids
+    assert "hit_recovered_B" in ids
+    # Verify it was persisted -- the column round-trips through JSON
+    # cleanly.
+    raw = _read_recs_column(seeded_db, "src")
+    assert raw is not None
+    persisted = json.loads(raw)
+    assert [r["trace_id"] for r in persisted] == [r["trace_id"] for r in result]
+
+
+def test_persist_recommendations_skips_success_traces(
+    seeded_db: sqlite3.Connection,
+) -> None:
+    # hit_clean has has_error=0; we should NOT compute or write.
+    assert persist_recommendations_for_trace(seeded_db, "hit_clean") is None
+    assert _read_recs_column(seeded_db, "hit_clean") is None
+
+
+def test_persist_recommendations_skips_null_has_error(tmp_path) -> None:
+    """has_error IS NULL (raw blob / adapter failure) is out of scope."""
+    conn = connect(tmp_path / "null_he.db")
+    try:
+        init_schema(conn)
+        insert_trace(
+            conn,
+            trace_id="null_he",
+            source_format="unknown",
+            raw_blob="{}",
+            atif=None,
+            agent_name=None,
+            model=None,
+            num_steps=None,
+            num_tool_calls=None,
+            has_error=None,
+        )
+        conn.commit()
+        assert persist_recommendations_for_trace(conn, "null_he") is None
+        assert _read_recs_column(conn, "null_he") is None
+    finally:
+        conn.close()
+
+
+def test_persist_recommendations_missing_trace_returns_none(
+    seeded_db: sqlite3.Connection,
+) -> None:
+    """Defensive: a non-existent trace_id returns None instead of crashing."""
+    assert persist_recommendations_for_trace(seeded_db, "does-not-exist") is None
+
+
+def test_persist_recommendations_writes_empty_list_when_no_candidates(
+    tmp_path,
+) -> None:
+    """Cold-start: failed trace, no qualifying candidates -> writes ``[]``
+    (not NULL) so the detail view can distinguish "computed, found
+    nothing" from "never computed"."""
+    conn = connect(tmp_path / "cold_persist.db")
+    try:
+        init_schema(conn)
+        insert_trace(
+            conn,
+            trace_id="lonely_failed",
+            source_format="synth",
+            raw_blob="{}",
+            atif='{"schema_version": "ATIF-v1.7"}',
+            agent_name="a",
+            model="m",
+            num_steps=1,
+            num_tool_calls=0,
+            has_error=1,
+        )
+        store_embedding(
+            conn,
+            trace_id="lonely_failed",
+            embedding=_vec(1.0),
+            source_text_hash="h",
+            model=EMBEDDING_MODEL,
+            embedded_at=datetime.now(timezone.utc).isoformat(),
+        )
+        conn.commit()
+
+        result = persist_recommendations_for_trace(conn, "lonely_failed")
+        assert result == []
+        # Crucially, the column got written -- "[]", not left as NULL.
+        raw = _read_recs_column(conn, "lonely_failed")
+        assert raw is not None
+        assert json.loads(raw) == []
+    finally:
+        conn.close()

@@ -52,11 +52,15 @@ import tempfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from urllib.parse import quote
 
 import streamlit as st
 
 from trace_marketplace.enrich.failure_rules import persist_signals_for_trace
+from trace_marketplace.enrich.recovered_recommendations import (
+    persist_recommendations_for_trace,
+)
 from trace_marketplace.ingest.pipeline import IngestResult, ingest_file
 from trace_marketplace.search.runner import (
     EmbedAndSimilarResult,
@@ -200,6 +204,19 @@ class _UploadOutcome:
     ran (which is unconditional for validated rows but degrades
     gracefully when ``OPENAI_API_KEY`` is missing); a non-validated
     upload leaves it as ``None``.
+
+    ``recovered_recommendations`` is the slice-10 follow-up to
+    ``embed_and_similar``: for failing uploads (``has_error = 1``) we
+    additionally compute the top-k similar traces that recovered
+    in-session and render their recovery summaries on the upload result
+    page. Three-state semantics:
+
+    * ``None``      -- skipped (success / unknown trace, or upload was
+                       a raw blob without rule-pass results).
+    * ``[]``        -- computed but the corpus has no qualifying
+                       candidates yet (e.g. fresh DB before the events
+                       extractor has run).
+    * non-empty     -- top-k matches with ``recoveries`` per match.
     """
 
     filename: str
@@ -207,6 +224,7 @@ class _UploadOutcome:
     signals: dict[str, bool] | None
     error: str | None
     embed_and_similar: EmbedAndSimilarResult | None = None
+    recovered_recommendations: list[dict[str, Any]] | None = None
 
 
 def _process_upload(
@@ -276,6 +294,30 @@ def _process_upload(
     if ingest_result.validated:
         embed_and_similar = embed_and_recommend_similar(conn, ingest_result.trace_id)
 
+    # Slice 10 follow-up: if the trace looks like a failure (rule pass
+    # set has_error = 1), pre-compute the "Recoveries from similar
+    # failures" list inline so the upload result page can render the
+    # panel immediately rather than waiting for the next batch refresh.
+    # Pure-local cosine NN over the existing embeddings -- no API
+    # calls, no cost. The helper itself is the gate (returns None for
+    # success / unknown traces), so we can call it unconditionally on
+    # validated uploads. Wrapped in try/except for the same reason as
+    # the rule pass: a buggy helper shouldn't break a perfectly good
+    # ingest.
+    recovered_recommendations: list[dict[str, Any]] | None = None
+    if ingest_result.validated:
+        try:
+            recovered_recommendations = persist_recommendations_for_trace(
+                conn, ingest_result.trace_id
+            )
+        except Exception:
+            log.exception(
+                "Recovered-recommendations pass failed for %s (%s); "
+                "trace is still ingested",
+                safe_name,
+                ingest_result.trace_id,
+            )
+
     conn.commit()
     return _UploadOutcome(
         filename=safe_name,
@@ -283,6 +325,7 @@ def _process_upload(
         signals=signals,
         error=None,
         embed_and_similar=embed_and_similar,
+        recovered_recommendations=recovered_recommendations,
     )
 
 
@@ -326,7 +369,76 @@ def _render_outcome(outcome: _UploadOutcome) -> None:
         f"{_format_signals(outcome.signals)})"
     )
     st.markdown(f"[Open the trace ->]({trace_url})")
+    # Slice 10: render recovered-failures recommendations BEFORE the
+    # slice-6 similar-traces panel. For failing uploads the recoveries
+    # are the higher-signal payload (concrete advice, not just "this
+    # other trace is vaguely related") so they deserve top billing.
+    _render_recovered_recommendations(outcome.recovered_recommendations, trace_url)
     _render_similar_traces(outcome.embed_and_similar)
+
+
+def _render_recovered_recommendations(
+    recommendations: list[dict[str, Any]] | None,
+    trace_url: str,
+) -> None:
+    """Inline "Recoveries from similar failures" panel on upload result.
+
+    Mirrors the detail-view panel but trimmed to a compact preview (top
+    3 matches, with their recovery summaries inline) so the upload
+    result page stays scannable. Users who want the full top-10 list
+    click through to the detail view via ``trace_url``.
+
+    Three states match :attr:`_UploadOutcome.recovered_recommendations`:
+
+    * ``None``      -- the trace wasn't a failure; render nothing.
+    * ``[]``        -- failing trace but no qualifying candidates yet;
+                       render a small caption so the user knows the
+                       feature ran but the corpus is too thin to help
+                       (typical for fresh databases or very novel
+                       failure shapes).
+    * non-empty     -- render up to three matches with their first
+                       recovery summary as a quoted blockquote, plus a
+                       "see all N on the trace page" footer when there
+                       are more than three.
+    """
+    if recommendations is None:
+        return
+    if not recommendations:
+        st.caption(
+            "_No recovery suggestions yet -- no similar failures in the "
+            "corpus have a recorded recovery. Re-run the events "
+            "extractor once more traces have been judged._"
+        )
+        return
+
+    preview_count = 3
+    with st.container(border=True):
+        total = len(recommendations)
+        st.markdown(
+            f"**Recoveries from similar failures** "
+            f"({total} trace{'s' if total != 1 else ''} hit similar walls and got out)"
+        )
+        for rec in recommendations[:preview_count]:
+            sim_url = f"?trace_id={quote(str(rec['trace_id']), safe='')}"
+            similarity = rec.get("similarity")
+            sim_str = (
+                f"{similarity:.3f}" if isinstance(similarity, (int, float)) else "n/a"
+            )
+            source_format = rec.get("source_format") or "unknown"
+            st.markdown(
+                f"- [`{rec['trace_id']}`]({sim_url}) -- similarity "
+                f"**{sim_str}** · `{source_format}`"
+            )
+            recoveries = rec.get("recoveries") or []
+            # One inline summary per match is enough for the preview;
+            # full set of per-event summaries renders on detail view.
+            if recoveries:
+                first = recoveries[0]
+                summary = first.get("summary")
+                if isinstance(summary, str) and summary.strip():
+                    st.caption(f"  > {summary.strip()}")
+        if total > preview_count:
+            st.markdown(f"[See all {total} on the trace page ->]({trace_url})")
 
 
 def _render_similar_traces(

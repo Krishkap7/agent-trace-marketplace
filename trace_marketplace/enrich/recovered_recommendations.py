@@ -230,6 +230,57 @@ def compute_recommendations(
     return out
 
 
+def persist_recommendations_for_trace(
+    conn: sqlite3.Connection,
+    trace_id: str,
+    *,
+    top_k: int = DEFAULT_TOP_K,
+) -> list[dict[str, Any]] | None:
+    """Compute + persist recommendations for one freshly-ingested trace.
+
+    Mirrors :func:`trace_marketplace.enrich.failure_rules.persist_signals_for_trace`
+    in shape: the upload flow calls this on every validated insert so the
+    "Recoveries from similar failures" panel renders straight away on the
+    upload result page (and on the detail view it links to) rather than
+    waiting for the next batch refresh.
+
+    Scope:
+
+    * Only runs when the trace has ``has_error = 1``. The detail-view
+      panel only renders for failed traces, so computing for successes
+      would just write empty arrays that no one reads. NULL is also
+      skipped (raw-blob uploads, adapter failures, anything where the
+      rule pass didn't conclude).
+    * Pure-local: cosine NN over the existing embeddings table. No API
+      calls, no cost.
+
+    Returns:
+
+    * ``None`` when the trace is out of scope (missing row, or
+      ``has_error != 1``). Callers can treat this as "don't render the
+      panel" without a separate flag.
+    * The computed list (possibly empty) when the trace is in scope. An
+      empty list means the corpus has no qualifying candidates yet --
+      e.g. a fresh DB before :mod:`scripts.extract_failure_events` has
+      run -- and the panel can render a small caption to that effect.
+
+    Does not commit; the caller batches the commit with the other
+    upload-flow writes (signals, embedding) so a single transaction
+    covers the whole row.
+    """
+    row = conn.execute(
+        "SELECT has_error FROM traces WHERE id = ?", (trace_id,)
+    ).fetchone()
+    if row is None or row["has_error"] != 1:
+        return None
+    recommendations = compute_recommendations(conn, trace_id, top_k=top_k)
+    conn.execute(
+        "UPDATE traces SET recovered_recommendations = ? WHERE id = ?",
+        (json.dumps(recommendations), trace_id),
+    )
+    return recommendations
+
+
 def select_failed_target_ids(conn: sqlite3.Connection) -> list[str]:
     """Return ids of every trace that needs a recommendations refresh.
 
@@ -277,5 +328,6 @@ __all__ = [
     "SIMILARITY_PRECISION",
     "compute_recommendations",
     "count_qualifying_candidates",
+    "persist_recommendations_for_trace",
     "select_failed_target_ids",
 ]
