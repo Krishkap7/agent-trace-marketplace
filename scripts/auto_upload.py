@@ -37,6 +37,7 @@ import argparse
 import logging
 import shutil
 import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -46,7 +47,7 @@ from watchdog.observers import Observer
 from trace_marketplace.enrich.failure_rules import persist_signals_for_trace
 from trace_marketplace.ingest.pipeline import ingest_file
 from trace_marketplace.search.runner import embed_and_recommend_similar
-from trace_marketplace.storage.db import connect
+from trace_marketplace.storage.db import connect, init_schema
 
 log = logging.getLogger("auto_upload")
 
@@ -62,17 +63,29 @@ class SessionHandler(FileSystemEventHandler):
     actual "is it ready to ingest" decision is moved into
     :func:`get_settled`, which the main loop polls. The handler itself
     is dirt cheap: dict insert per event, no I/O.
+
+    Thread safety: watchdog calls ``on_modified`` / ``on_created`` from
+    its observer thread while the main loop reads ``last_modified``
+    from :func:`get_settled`. Without the lock, a new event firing
+    mid-iteration in ``get_settled`` would raise
+    ``RuntimeError: dictionary changed size during iteration`` and
+    crash the daemon (the outer ``KeyboardInterrupt`` handler doesn't
+    catch it). The lock is held for the smallest possible window in
+    each method -- one dict assignment or a snapshot copy.
     """
 
     def __init__(self) -> None:
         self.last_modified: dict[Path, float] = {}
+        self._lock = threading.Lock()
 
     def _record(self, src_path: str, is_directory: bool) -> None:
         if is_directory:
             return
         path = Path(src_path)
         if path.suffix == ".jsonl":
-            self.last_modified[path] = time.time()
+            now = time.time()
+            with self._lock:
+                self.last_modified[path] = now
 
     def on_modified(self, event: FileSystemEvent) -> None:
         self._record(event.src_path, event.is_directory)
@@ -84,31 +97,54 @@ class SessionHandler(FileSystemEventHandler):
 def get_settled(handler: SessionHandler, debounce: float) -> list[Path]:
     """Return + clear files whose last write was at least ``debounce`` seconds ago.
 
-    The handler dict is mutated in place: returned paths are removed
-    so subsequent passes don't re-ingest the same file. If the agent
-    writes more to a removed file later, the next event re-adds it
-    with a fresh timestamp.
+    Takes a snapshot of the handler dict under its lock, picks the
+    settled paths, and removes them under the same lock. The
+    snapshot-then-mutate pattern is what keeps the watchdog observer
+    thread safe from a ``dictionary changed size during iteration``
+    crash if a fresh event lands mid-pass.
     """
     now = time.time()
-    settled = [p for p, t in handler.last_modified.items() if now - t >= debounce]
-    for p in settled:
-        handler.last_modified.pop(p, None)
+    with handler._lock:
+        snapshot = list(handler.last_modified.items())
+        settled = [p for p, t in snapshot if now - t >= debounce]
+        for p in settled:
+            handler.last_modified.pop(p, None)
     return settled
 
 
-def target_dir(path: Path) -> Path | None:
-    """Map a watched-source path to its ``data/raw/`` staging dir.
+_SOURCE_ROOTS: tuple[tuple[Path, Path], ...] = (
+    (CLAUDE_DIR, Path("data/raw/claude_code")),
+    (CODEX_DIR, Path("data/raw/codex")),
+)
 
-    Returns ``None`` if the path isn't under either of the two known
-    source roots; the caller treats that as a skip rather than an
+
+def staged_path(source: Path) -> Path | None:
+    """Map a watched-source path to its full ``data/raw/<fmt>/<...>`` dest.
+
+    Preserves the relative path *under* the source root so two
+    sessions that share a bare filename in different project /
+    date directories don't collide on disk. Examples::
+
+        ~/.claude/projects/projA/session.jsonl
+            -> data/raw/claude_code/projA/session.jsonl
+
+        ~/.codex/sessions/2026/05/12/abc.jsonl
+            -> data/raw/codex/2026/05/12/abc.jsonl
+
+    Returns ``None`` if the source isn't under either of the two
+    known roots; the caller treats that as a skip rather than an
     error so a stray symlink under ``~/.claude/projects/`` can't
-    crash the loop.
+    crash the loop. (Caught by Cursor bugbot on commit c579f7e:
+    the prior flat ``dest_dir / source.name`` layout broke
+    ``sync.py``'s mtime+size dedup whenever two project subdirs
+    contained a same-named ``.jsonl``.)
     """
-    s = path.as_posix()
-    if "/.claude/projects/" in s or s.endswith("/.claude/projects"):
-        return Path("data/raw/claude_code")
-    if "/.codex/sessions/" in s or s.endswith("/.codex/sessions"):
-        return Path("data/raw/codex")
+    for root, staging in _SOURCE_ROOTS:
+        try:
+            rel = source.relative_to(root)
+        except ValueError:
+            continue
+        return staging / rel
     return None
 
 
@@ -137,13 +173,12 @@ def process(source: Path, conn: sqlite3.Connection) -> None:
             log.warning("- %s: file vanished before processing", source.name)
             return
 
-        dest_dir = target_dir(source)
-        if dest_dir is None:
+        dest = staged_path(source)
+        if dest is None:
             log.warning("- %s: not under a known source root, skipping", source)
             return
 
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        dest = dest_dir / source.name
+        dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, dest)
 
         result = ingest_file(dest, conn)
@@ -217,6 +252,7 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     conn = connect(args.db)
+    init_schema(conn)
     handler = SessionHandler()
     observer = _build_observer(handler)
 

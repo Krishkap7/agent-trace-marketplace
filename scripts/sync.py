@@ -25,8 +25,8 @@ import argparse
 import logging
 from pathlib import Path
 
-from scripts.auto_upload import CLAUDE_DIR, CODEX_DIR, process, target_dir
-from trace_marketplace.storage.db import connect
+from scripts.auto_upload import CLAUDE_DIR, CODEX_DIR, process, staged_path
+from trace_marketplace.storage.db import connect, init_schema
 
 log = logging.getLogger("sync")
 
@@ -40,11 +40,8 @@ def _already_staged(source: Path) -> bool:
     via the trace-id INSERT OR REPLACE, but that doesn't help the
     embedding step, which has no pre-call hash check.
     """
-    dest_dir = target_dir(source)
-    if dest_dir is None:
-        return False
-    dest = dest_dir / source.name
-    if not dest.exists():
+    dest = staged_path(source)
+    if dest is None or not dest.exists():
         return False
     src_stat = source.stat()
     dst_stat = dest.stat()
@@ -65,6 +62,7 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     conn = connect(args.db)
+    init_schema(conn)
     try:
         scanned = ingested = skipped = 0
         for root, label in [(CLAUDE_DIR, "Claude Code"), (CODEX_DIR, "Codex")]:
