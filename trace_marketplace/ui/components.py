@@ -201,6 +201,18 @@ def render_header(trace_row: dict[str, Any]) -> None:
             f"**Judge reasoning** (Sonnet 4.6)\n\n> {reasoning.strip()}",
             icon=":material/psychology:",
         )
+    elif has_error in (0, 1):
+        # Tell the user *why* there's no judge output here so a clean
+        # success doesn't read as "the feature is broken". The judge
+        # only ran on all has_error=1 + a 10% sample of has_error=0,
+        # so 91% of clean successes legitimately don't have a label.
+        st.caption(
+            "_Not classified by the LLM judge._  Only `has_error=1` "
+            "traces plus a deterministic 10% sample of clean successes "
+            "(seed 42) were sent to Sonnet 4.6 -- this row wasn't "
+            "in the sample. Re-run `scripts/judge_failures.py` with a "
+            "larger sample rate to include it."
+        )
 
 
 def render_filters_summary(counts: dict[str, int]) -> None:
