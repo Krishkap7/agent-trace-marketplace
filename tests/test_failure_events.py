@@ -23,11 +23,13 @@ from trace_marketplace.enrich.failure_events import (
     EventsResult,
     FailureEvent,
     SEVERITY_ORDER,
+    _render_conversation_with_indices,
     derive_ultimately_succeeded,
     estimate_cost_usd,
     extract_events,
     summarize_label,
 )
+from trace_marketplace.enrich.failure_judge import STEP_RENDER_TAIL_COUNT
 from trace_marketplace.enrich.failure_taxonomy import FailureLabel
 
 
@@ -568,3 +570,88 @@ def test_validate_event_nulls_empty_string_recovery_summary_when_not_recovered()
     result = extract_events(_TRIVIAL_TRAJ, client=client)
     assert len(result.events) == 1
     assert result.events[0].recovery_summary is None
+
+
+# ---------- _render_conversation_with_indices ----------
+#
+# Regression guard from Cursor Bugbot on PR #13 a754746: the prompt
+# claimed "Step indices are 1-based and match the UI's step badges" but
+# the upstream ``failure_judge._render_conversation`` we were calling
+# strips all indices. The model was guessing step numbers from line
+# position, which works for short traces but breaks across the head-
+# omitted placeholder. The new helper prefixes every visible line with
+# its 1-based index.
+
+
+def _step(source: str, message: str) -> dict[str, Any]:
+    return {"source": source, "message": message}
+
+
+def test_render_indices_short_trace_prefixes_each_step() -> None:
+    traj = {"steps": [_step("user", "do X"), _step("agent", "ok"), _step("user", "Y")]}
+    out = _render_conversation_with_indices(traj)
+    lines = out.splitlines()
+    assert lines[0].startswith("[step 1]")
+    assert lines[1].startswith("[step 2]")
+    assert lines[2].startswith("[step 3]")
+
+
+def test_render_indices_long_trace_emits_offset_header_and_aligned_prefixes() -> None:
+    """When more than STEP_RENDER_TAIL_COUNT steps exist, the head-omitted
+    placeholder must name the first visible step's index and every
+    rendered step must carry the matching 1-based prefix -- this is
+    the case the previous renderer was silently broken on."""
+    total = STEP_RENDER_TAIL_COUNT + 50  # head_omitted = 50
+    traj = {
+        "steps": [
+            _step("user" if i % 2 == 0 else "agent", f"msg {i}") for i in range(total)
+        ]
+    }
+    out = _render_conversation_with_indices(traj)
+    lines = out.splitlines()
+    head_omitted = total - STEP_RENDER_TAIL_COUNT
+    first_visible = head_omitted + 1
+    assert lines[0] == (
+        f"(... {head_omitted} earlier steps omitted; "
+        f"visible steps start at step {first_visible} ...)"
+    )
+    assert lines[1].startswith(f"[step {first_visible}]")
+    # Last rendered line should be [step <total>] since tail covers
+    # the last STEP_RENDER_TAIL_COUNT steps inclusive of the final one.
+    assert lines[-1].startswith(f"[step {total}]")
+
+
+def test_render_indices_empty_steps_returns_placeholder() -> None:
+    assert _render_conversation_with_indices({"steps": []}) == "(no steps)"
+    assert _render_conversation_with_indices({}) == "(no steps)"
+
+
+def test_render_indices_skips_non_dict_step_entries() -> None:
+    """Defensive: ATIF should always emit dict steps but a malformed
+    blob shouldn't crash the renderer. Non-dict entries are skipped
+    silently -- the resulting indices are still correct because we
+    iterate with ``enumerate`` over the original list and only skip on
+    render, not on counting."""
+    traj = {"steps": [_step("user", "first"), "garbage", _step("agent", "third")]}
+    out = _render_conversation_with_indices(traj)
+    lines = out.splitlines()
+    # Two rendered lines; index 1 for "first" and index 3 for "third"
+    # (slot 2 was the non-dict "garbage" entry).
+    assert len(lines) == 2
+    assert lines[0].startswith("[step 1]")
+    assert lines[1].startswith("[step 3]")
+
+
+def test_build_prompt_includes_indexed_lines_when_trace_is_long() -> None:
+    """End-to-end check: the actual prompt sent to Opus contains the
+    indexed step prefixes, not the old un-indexed lines."""
+    total = STEP_RENDER_TAIL_COUNT + 10
+    traj = {"steps": [_step("user", f"line {i}") for i in range(total)]}
+    client = _make_client([_response(_tool_use_block(input_payload={"events": []}))])
+    extract_events(traj, client=client)
+    _, kwargs = client.messages.create.call_args
+    user_msg = kwargs["messages"][0]["content"]
+    body = user_msg if isinstance(user_msg, str) else user_msg[0].get("text", "")
+    assert "[step 11]" in body  # first visible step after 10 omitted
+    assert f"[step {total}]" in body
+    assert "visible steps start at step 11" in body

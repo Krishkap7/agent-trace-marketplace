@@ -41,7 +41,11 @@ from typing import Any, Protocol
 
 from anthropic import Anthropic
 
-from trace_marketplace.enrich.failure_judge import _render_conversation
+from trace_marketplace.enrich.failure_judge import (
+    MAX_PROMPT_CHARS,
+    STEP_RENDER_TAIL_COUNT,
+    _render_step,
+)
 from trace_marketplace.enrich.failure_taxonomy import (
     FailureLabel,
     LABEL_DESCRIPTIONS,
@@ -294,13 +298,74 @@ _RECORD_EVENTS_TOOL: dict[str, Any] = {
 # ---------------------------------------------------------------------------
 
 
+def _render_conversation_with_indices(traj: dict[str, Any]) -> str:
+    """Compress steps into a model-friendly summary with EXPLICIT 1-based
+    indices on every line.
+
+    Slice 4's :func:`failure_judge._render_conversation` classifies a
+    whole trace and doesn't care about per-step indices, so it omits
+    them to save tokens. Slice 10 asks the model for ``step_start``,
+    ``step_end``, and ``recovery_step``, which are meaningful ONLY if
+    the model can map visible lines back to 1-based step indices that
+    align with the UI step badges. Without an explicit prefix the model
+    has to count lines from the top -- fine for short traces but a
+    source of subtle off-by-many errors when many head steps are
+    omitted (the placeholder line can swallow tens to hundreds of
+    steps, and the model has no signal for how many).
+
+    Output format per step:
+
+        [step <N>] [<source>] <msg> {<tools>} -> <obs>
+
+    The head-omitted placeholder also names the index of the first
+    visible step so the model never has to do mental arithmetic across
+    the omission boundary:
+
+        (... <K> earlier steps omitted; visible steps start at step <M> ...)
+
+    Mirrors the compression strategy of the slice-4 helper otherwise
+    (tail of :data:`STEP_RENDER_TAIL_COUNT` rendered in full, hard cut
+    at :data:`MAX_PROMPT_CHARS`).
+    """
+    steps = traj.get("steps") or []
+    if not isinstance(steps, list) or not steps:
+        return "(no steps)"
+
+    total = len(steps)
+    rendered: list[str] = []
+    if total > STEP_RENDER_TAIL_COUNT:
+        head_omitted = total - STEP_RENDER_TAIL_COUNT
+        first_visible_idx = head_omitted + 1
+        rendered.append(
+            f"(... {head_omitted} earlier steps omitted; "
+            f"visible steps start at step {first_visible_idx} ...)"
+        )
+        for offset, step in enumerate(steps[-STEP_RENDER_TAIL_COUNT:]):
+            if not isinstance(step, dict):
+                continue
+            idx = first_visible_idx + offset
+            rendered.append(f"[step {idx}] {_render_step(step)}")
+    else:
+        for idx, step in enumerate(steps, start=1):
+            if not isinstance(step, dict):
+                continue
+            rendered.append(f"[step {idx}] {_render_step(step)}")
+
+    body = "\n".join(rendered)
+    if len(body) > MAX_PROMPT_CHARS:
+        body = body[: MAX_PROMPT_CHARS - 50].rstrip() + "\n(... truncated ...)"
+    return body
+
+
 def _build_user_prompt(traj: dict[str, Any]) -> str:
     """Build the Opus 4.7 user prompt for one trace.
 
     Same compression strategy as the slice-4 judge (latest 30 steps in
-    full, earlier steps replaced by a placeholder). We add explicit
-    1-based step numbering so the model can cite step ranges that the
-    UI's step badges line up with.
+    full, earlier steps replaced by a placeholder) but with every
+    visible line prefixed by its 1-based step index so the model's
+    emitted ``step_start`` / ``step_end`` / ``recovery_step`` line up
+    with the UI's step badges. See :func:`_render_conversation_with_indices`
+    for why we don't reuse the slice-4 renderer.
     """
     agent = traj.get("agent") or {}
     agent_name = agent.get("name", "unknown")
@@ -324,9 +389,11 @@ def _build_user_prompt(traj: dict[str, Any]) -> str:
         f"- Agent: {agent_name}   Model: {model_name}",
         f"- Steps: {num_steps}    Tool calls: {num_tool_calls}",
         "",
-        "Conversation (compressed, latest steps last). Step indices are "
-        "1-based and match the UI's step badges:",
-        _render_conversation(traj),
+        "Conversation (compressed, latest steps last). Every line is "
+        "prefixed with [step N] where N is the 1-based step index that "
+        "matches the UI's step badges -- use these for step_start, "
+        "step_end, and recovery_step in your output:",
+        _render_conversation_with_indices(traj),
         "",
         "Use the `record_failure_events` tool to return the timeline.",
         "",
