@@ -17,6 +17,7 @@ from urllib.parse import quote
 
 import streamlit as st
 
+from trace_marketplace.search.runner import NLSearchResult, run_nl_search
 from trace_marketplace.ui.components import render_filters_summary
 from trace_marketplace.ui.queries import (
     HAS_ERROR_OPTIONS,
@@ -25,11 +26,22 @@ from trace_marketplace.ui.queries import (
     bounds,
     distinct_values,
     list_traces,
+    list_traces_by_ids,
     trace_counts,
 )
 
 PAGE_SIZE: int = 100
 """Acceptance-criteria-mandated cap on rows per page."""
+
+_NL_QUERY_STATE_KEY: str = "_slice6_nl_query"
+"""Where the most-recent NL search input lives across reruns. Stored
+in ``st.session_state`` so the result panel survives sidebar tweaks
+without re-issuing the LLM call -- :func:`_render_nl_panel` only
+re-runs the search when this value changes."""
+
+_NL_RESULT_STATE_KEY: str = "_slice6_nl_result"
+"""Where the parsed :class:`NLSearchResult` is cached between reruns.
+Avoids re-paying the parse + embed cost on every widget tweak."""
 
 _OPEN_LINK_COLUMN: str = "_open"
 """Synthetic column injected into every list row so ``st.dataframe`` can
@@ -176,6 +188,153 @@ def _sidebar_filters(conn: sqlite3.Connection) -> ListFilters:
     )
 
 
+def _decorate_rows_with_open_link(rows: list[dict]) -> None:
+    """Inject the ``_open`` LinkColumn target onto each row in place.
+
+    Pulled out into a helper so the standard list path AND the NL
+    ranked-result path render via the same dataframe wiring; if a
+    future trace_id ever needs different encoding it lives in exactly
+    one place.
+    """
+    for row in rows:
+        row[_OPEN_LINK_COLUMN] = f"?trace_id={quote(str(row['id']), safe='')}"
+
+
+def _render_nl_search_box() -> str:
+    """Render the slice 6 NL-query text input and return its value.
+
+    Wrapped in an ``st.form`` so the user can hit Enter to submit
+    without burning an API call on every keystroke. The form has a
+    "Clear" companion button that resets both the input and the
+    cached result; sidebar tweaks reuse the cached parse so the
+    LLM round-trip happens at most once per unique query.
+    """
+    with st.form(key="nl_search_form", clear_on_submit=False):
+        col_input, col_submit, col_clear = st.columns([8, 1, 1])
+        with col_input:
+            query = st.text_input(
+                "Natural-language search",
+                value=st.session_state.get(_NL_QUERY_STATE_KEY, ""),
+                placeholder=(
+                    "e.g. 'find loops in claude_code' or "
+                    "'agents that hallucinated APIs'"
+                ),
+                label_visibility="collapsed",
+            )
+        with col_submit:
+            submitted = st.form_submit_button("Search", width="stretch")
+        with col_clear:
+            cleared = st.form_submit_button("Clear", width="stretch")
+
+    if cleared:
+        st.session_state.pop(_NL_QUERY_STATE_KEY, None)
+        st.session_state.pop(_NL_RESULT_STATE_KEY, None)
+        return ""
+    if submitted and query.strip():
+        st.session_state[_NL_QUERY_STATE_KEY] = query.strip()
+        st.session_state.pop(_NL_RESULT_STATE_KEY, None)
+    return st.session_state.get(_NL_QUERY_STATE_KEY, "")
+
+
+def _run_or_reuse_nl_search(conn: sqlite3.Connection, query: str) -> NLSearchResult:
+    """Memoise the NL search result in ``st.session_state``.
+
+    The result is keyed off the query string so a sidebar tweak (or
+    any incidental Streamlit rerun) doesn't re-issue the parser /
+    embed calls. Calling :func:`run_nl_search` directly is still the
+    primary cost-control gate -- this layer is the "don't double-pay
+    for the same question" tier on top.
+    """
+    cached = st.session_state.get(_NL_RESULT_STATE_KEY)
+    if isinstance(cached, tuple) and cached[0] == query:
+        return cached[1]
+    result = run_nl_search(conn, query)
+    st.session_state[_NL_RESULT_STATE_KEY] = (query, result)
+    return result
+
+
+def _render_nl_results(conn: sqlite3.Connection, result: NLSearchResult) -> None:
+    """Render a :class:`NLSearchResult` as the main panel.
+
+    Three branches:
+
+    * ``error`` populated -> show a Streamlit ``st.error`` with the
+      configuration hint; the rest of the page is suppressed.
+    * ``hits`` is empty -> show ``st.info`` and the parsed filters
+      so the user can see what the parser made of their query.
+    * Happy path -> show the "Search intent" caption + a dataframe
+      of ranked traces with the similarity score in the leftmost
+      column.
+    """
+    parsed = result.parsed
+    if result.error:
+        st.error(result.error)
+        return
+    if parsed is not None:
+        st.caption(
+            f"**Search intent**: {parsed.semantic_intent}  \n"
+            f"**Explanation**: {parsed.explanation}"
+        )
+        filters_summary = []
+        if parsed.failure_labels:
+            filters_summary.append("labels=" + ",".join(parsed.failure_labels))
+        if parsed.source_formats:
+            filters_summary.append("formats=" + ",".join(parsed.source_formats))
+        if parsed.agent_names:
+            filters_summary.append("agents=" + ",".join(parsed.agent_names))
+        if parsed.has_error is True:
+            filters_summary.append("has_error=true")
+        if parsed.has_error is False:
+            filters_summary.append("has_error=false")
+        if filters_summary:
+            st.caption("Applied filters: " + " | ".join(filters_summary))
+        else:
+            st.caption("Applied filters: (none — pure semantic ranking)")
+
+    if not result.hits:
+        st.info(
+            f"No traces matched. Candidate pool after filters: "
+            f"{result.candidate_count} rows."
+        )
+        return
+
+    rows_by_id = list_traces_by_ids(conn, [h.trace_id for h in result.hits])
+    enriched_rows: list[dict] = []
+    for hit in result.hits:
+        row = rows_by_id.get(hit.trace_id)
+        if row is None:
+            continue
+        row = dict(row)
+        row["similarity"] = round(hit.similarity, 4)
+        enriched_rows.append(row)
+    _decorate_rows_with_open_link(enriched_rows)
+
+    st.markdown(
+        f"Showing **top {len(enriched_rows)}** of "
+        f"**{result.candidate_count}** candidate traces, ranked by "
+        f"cosine similarity to the search intent."
+    )
+    st.dataframe(
+        enriched_rows,
+        column_order=(_OPEN_LINK_COLUMN, "similarity", *LIST_COLUMNS),
+        column_config={
+            _OPEN_LINK_COLUMN: st.column_config.LinkColumn(
+                label="Details",
+                display_text="Open ->",
+                help="Open the full conversation thread + judge reasoning.",
+            ),
+            "similarity": st.column_config.NumberColumn(
+                label="Similarity",
+                format="%.4f",
+                help="Cosine similarity to the embedded search intent.",
+            ),
+        },
+        hide_index=True,
+        width="stretch",
+        key="nl_results_table",
+    )
+
+
 def render(conn: sqlite3.Connection) -> None:
     """Render the list view. ``app.py`` calls this when no
     ``?trace_id=`` or ``?page=...`` query param is present."""
@@ -183,8 +342,9 @@ def render(conn: sqlite3.Connection) -> None:
     with header_col:
         st.title("Trace marketplace")
         st.caption(
-            "Browse ingested coding-agent traces. Use the sidebar to "
-            "filter; click **Open ->** on any row to see the full trace."
+            "Browse ingested coding-agent traces. Use the search box "
+            "or the sidebar to filter; click **Open ->** on any row "
+            "to see the full trace."
         )
     with cta_col:
         # Plain anchor instead of ``st.button`` + ``st.query_params``
@@ -199,7 +359,23 @@ def render(conn: sqlite3.Connection) -> None:
             unsafe_allow_html=True,
         )
 
+    nl_query = _render_nl_search_box()
+
+    # NL mode REPLACES the standard filter + paginated table. The
+    # sidebar filters are still rendered (and the counts header is
+    # still useful) but they don't apply to the ranked results --
+    # the parser owns its own filter set.
     filters = _sidebar_filters(conn)
+
+    if nl_query:
+        st.caption(
+            "Natural-language search is active. Sidebar filters are "
+            "ignored while a query is in the box; use **Clear** above "
+            "to return to the standard filtered list."
+        )
+        result = _run_or_reuse_nl_search(conn, nl_query)
+        _render_nl_results(conn, result)
+        return
 
     page = st.number_input(
         "Page",
@@ -228,8 +404,7 @@ def render(conn: sqlite3.Connection) -> None:
     # can't break out of the ``trace_id`` value. Streamlit detects
     # the query_params change on click and reruns -- ``app.py``'s
     # router lands the user on the detail view.
-    for row in rows:
-        row[_OPEN_LINK_COLUMN] = f"?trace_id={quote(str(row['id']), safe='')}"
+    _decorate_rows_with_open_link(rows)
 
     st.dataframe(
         rows,

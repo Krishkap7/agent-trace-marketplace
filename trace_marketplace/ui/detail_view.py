@@ -22,11 +22,20 @@ from __future__ import annotations
 import json
 import sqlite3
 from typing import Any
+from urllib.parse import quote
 
 import streamlit as st
 
+from trace_marketplace.search.runner import NLSearchResult, run_find_similar
 from trace_marketplace.ui.components import render_header, render_step
-from trace_marketplace.ui.queries import get_trace
+from trace_marketplace.ui.queries import get_trace, list_traces_by_ids
+
+
+_SIMILAR_STATE_KEY: str = "_slice6_similar_for"
+"""Holds ``(trace_id, NLSearchResult)`` between Streamlit reruns so a
+sidebar tweak or expander toggle doesn't re-run the search. The cache
+key includes the source trace id so navigating to a different detail
+page automatically invalidates."""
 
 
 def _back_to_list_link() -> None:
@@ -84,6 +93,64 @@ def _render_atif_json(atif_blob: str) -> None:
             st.code(atif_blob, language="json")
 
 
+def _render_similar_panel(conn: sqlite3.Connection, trace_id: str) -> None:
+    """Render the slice 6 "Find similar" button + inline ranked results.
+
+    Behaviour:
+
+    * The button lives just under the header so the affordance is
+      obvious without scrolling. Clicking stores the result in
+      ``st.session_state`` so subsequent reruns (sidebar tweaks,
+      expander toggles) don't re-pay the vector NN cost.
+    * If the trace has no cached embedding (slice 6's backfill
+      script hasn't run for it yet) we show a clear instruction
+      instead of a stack trace.
+    * When the result is empty we show "no similar traces" rather
+      than an empty table.
+    """
+    if st.button(
+        "Find similar traces",
+        key=f"similar_btn_{trace_id}",
+        help=(
+            "Cosine nearest-neighbour over the slice 6 embedding "
+            "matrix. Click to load up to 10 traces ranked by "
+            "similarity to this one."
+        ),
+    ):
+        st.session_state[_SIMILAR_STATE_KEY] = (
+            trace_id,
+            run_find_similar(conn, trace_id),
+        )
+
+    cached = st.session_state.get(_SIMILAR_STATE_KEY)
+    if not isinstance(cached, tuple) or cached[0] != trace_id:
+        return
+    result: NLSearchResult = cached[1]
+    with st.container(border=True):
+        st.markdown("**Similar traces** (cosine nearest neighbours)")
+        if result.error:
+            st.warning(result.error)
+            return
+        if not result.hits:
+            st.info("No other traces are similar enough to surface.")
+            return
+        rows_by_id = list_traces_by_ids(conn, [h.trace_id for h in result.hits])
+        for hit in result.hits:
+            row = rows_by_id.get(hit.trace_id)
+            if row is None:
+                continue
+            label = row.get("failure_label") or "—"
+            agent = row.get("agent_name") or "?"
+            model = row.get("model") or "?"
+            steps = row.get("num_steps") or 0
+            url = f"?trace_id={quote(str(hit.trace_id), safe='')}"
+            st.markdown(
+                f"- [{hit.trace_id}]({url}) — similarity "
+                f"**{hit.similarity:.3f}** — label `{label}` — "
+                f"agent `{agent}` · model `{model}` · {steps} steps"
+            )
+
+
 def render(conn: sqlite3.Connection, trace_id: str) -> None:
     """Render the detail view. ``app.py`` calls this when
     ``?trace_id=...`` is present."""
@@ -95,6 +162,7 @@ def render(conn: sqlite3.Connection, trace_id: str) -> None:
         return
 
     render_header(row)
+    _render_similar_panel(conn, trace_id)
     st.divider()
 
     atif = _decode_atif(row.get("atif"))

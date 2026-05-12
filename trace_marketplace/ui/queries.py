@@ -167,6 +167,52 @@ def list_traces(
     return rows, total
 
 
+def list_traces_by_ids(
+    conn: sqlite3.Connection, trace_ids: list[str]
+) -> dict[str, dict[str, Any]]:
+    """Return ``{trace_id: row}`` for each requested id.
+
+    The output is keyed by id so the caller (slice 6 NL search /
+    Find Similar) can preserve its own similarity ranking order
+    -- SQL's ``IN (...)`` doesn't guarantee row order, and we don't
+    want the embedding ranking to get re-sorted by some incidental
+    SELECT order. Columns match :data:`LIST_COLUMNS` so the
+    rendering code is identical to the standard filter path.
+    """
+    if not trace_ids:
+        return {}
+    placeholders = ",".join("?" * len(trace_ids))
+    select_cols = ", ".join(LIST_COLUMNS)
+    sql = f"SELECT {select_cols} FROM traces WHERE id IN ({placeholders})"
+    cur = conn.execute(sql, trace_ids)
+    return {row["id"]: dict(row) for row in cur.fetchall()}
+
+
+def list_trace_ids(
+    conn: sqlite3.Connection, filters: ListFilters | None = None
+) -> list[str]:
+    """Return every trace id matching ``filters`` (no pagination).
+
+    Slice 6 NL-search joins the structured filter result with the
+    vector-NN ranking; the ranker only needs the id set, not the
+    full row payload. Pulled out as its own helper so list_view
+    doesn't have to splice a giant ``limit`` argument into
+    :func:`list_traces` to mean "give me everything".
+
+    Constrained to ``atif IS NOT NULL`` because rows without ATIF
+    have no embedding (the backfill skips them), so they can never
+    appear in a similarity ranking. Letting them through would
+    silently shrink the result set.
+    """
+    filters = filters or ListFilters()
+    where_sql, params = _build_where(filters)
+    sql = (
+        f"SELECT id FROM traces WHERE {where_sql} AND atif IS NOT NULL ORDER BY id ASC"
+    )
+    cur = conn.execute(sql, params)
+    return [row["id"] for row in cur.fetchall()]
+
+
 def get_trace(conn: sqlite3.Connection, trace_id: str) -> dict[str, Any] | None:
     """Return one full trace row (including ``raw_blob`` and ``atif``).
 
@@ -259,6 +305,8 @@ __all__ = [
     "bounds",
     "distinct_values",
     "get_trace",
+    "list_trace_ids",
     "list_traces",
+    "list_traces_by_ids",
     "trace_counts",
 ]
