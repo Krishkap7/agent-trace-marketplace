@@ -22,6 +22,14 @@ data/*.db-shm
 .env.*
 !.env.example
 
+# Scratch directories Codex / Claude Code agents may write into when
+# we test them against this repo. They live at the project root only
+# because that's the cwd we run agents from -- nothing here is a
+# project artifact.
+/Codex/
+/.claude/
+/.codex/
+
 dist/
 build/
 *.egg-info/
