@@ -361,9 +361,7 @@ def test_final_metrics_aggregated_across_assistant_usage_blocks() -> None:
     traj = ClaudeCodeAdapter().to_atif(payload)
     assert traj is not None
     fm = traj.final_metrics
-    assert fm is not None, (
-        "final_metrics must aggregate across per-event usage blocks"
-    )
+    assert fm is not None, "final_metrics must aggregate across per-event usage blocks"
     assert fm.total_prompt_tokens == 15
     assert fm.total_completion_tokens == 35
     assert fm.total_cached_tokens == 300

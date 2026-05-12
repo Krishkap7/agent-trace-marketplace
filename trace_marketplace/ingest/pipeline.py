@@ -141,9 +141,7 @@ def _extract_raw_identity(raw_text: str) -> str | None:
     return None
 
 
-def _trace_id_for(
-    trajectory: Trajectory | None, path: Path, raw_text: str
-) -> str:
+def _trace_id_for(trajectory: Trajectory | None, path: Path, raw_text: str) -> str:
     """Pick a stable primary key for the ``traces`` row.
 
     Preference order, all deterministic:

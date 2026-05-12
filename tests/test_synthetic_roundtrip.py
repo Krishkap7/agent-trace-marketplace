@@ -196,7 +196,9 @@ def test_only_flag_byte_identical_to_full_run(
 
     full_match = list(full_dir.glob(glob.format(n=only_n)))
     only_match = list(only_dir.glob(glob.format(n=only_n)))
-    assert len(full_match) == 1, f"full run produced {len(full_match)} files matching {glob}"
+    assert len(full_match) == 1, (
+        f"full run produced {len(full_match)} files matching {glob}"
+    )
     assert len(only_match) == 1, f"--only {only_n} produced {len(only_match)} files"
 
     full_bytes = full_match[0].read_bytes()

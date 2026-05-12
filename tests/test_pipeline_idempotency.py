@@ -86,9 +86,7 @@ def test_trace_id_recovers_claude_code_session_id_when_validation_fails(
     tmp_path: Path,
 ) -> None:
     """Claude Code first event carries camelCase ``sessionId``."""
-    raw = json.dumps(
-        {"type": "user", "sessionId": "abc-claude-uuid", "message": {}}
-    )
+    raw = json.dumps({"type": "user", "sessionId": "abc-claude-uuid", "message": {}})
     trace_id = _trace_id_for(None, tmp_path / "session.jsonl", raw)
     assert trace_id == "abc-claude-uuid"
 
@@ -146,12 +144,8 @@ def test_two_failed_atif_validations_with_same_filename_get_distinct_ids(
 
     With raw-identity peek, the two distinct session_ids are
     recovered even on validation failure."""
-    raw_a = json.dumps(
-        {"schema_version": "ATIF-bad", "session_id": "domain-a-session"}
-    )
-    raw_b = json.dumps(
-        {"schema_version": "ATIF-bad", "session_id": "domain-b-session"}
-    )
+    raw_a = json.dumps({"schema_version": "ATIF-bad", "session_id": "domain-a-session"})
+    raw_b = json.dumps({"schema_version": "ATIF-bad", "session_id": "domain-b-session"})
     id_a = _trace_id_for(None, tmp_path / "a" / "trajectory.json", raw_a)
     id_b = _trace_id_for(None, tmp_path / "b" / "trajectory.json", raw_b)
     assert id_a != id_b
@@ -176,9 +170,7 @@ def test_extract_raw_identity_returns_none_on_unparseable_input() -> None:
 
 
 def test_extract_raw_identity_prefers_trajectory_id_over_session_id() -> None:
-    raw = json.dumps(
-        {"trajectory_id": "TJ-99", "session_id": "SS-11"}
-    )
+    raw = json.dumps({"trajectory_id": "TJ-99", "session_id": "SS-11"})
     assert _extract_raw_identity(raw) == "TJ-99"
 
 
@@ -208,9 +200,7 @@ def test_extract_raw_identity_finds_codex_session_meta_in_multi_line_jsonl() -> 
                     "payload": {"id": "real-codex-sess", "cli_version": "0.32"},
                 }
             ),
-            json.dumps(
-                {"type": "response_item", "payload": {"type": "message"}}
-            ),
+            json.dumps({"type": "response_item", "payload": {"type": "message"}}),
         ]
     )
     assert _extract_raw_identity(raw) == "real-codex-sess"
