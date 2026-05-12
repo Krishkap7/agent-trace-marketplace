@@ -9,20 +9,27 @@ field instead of an exception.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
-from trace_marketplace.enrich.embeddings import embed_text, load_embedding
+from trace_marketplace.enrich.embeddings import (
+    embed_text,
+    hash_source_text,
+    load_embedding,
+    store_embedding,
+)
 from trace_marketplace.search.nl_query import (
     NLQueryError,
     ParsedQuery,
     parse_nl_query,
 )
 from trace_marketplace.search.similar import SimilarityHit, find_similar
+from trace_marketplace.search.text_extraction import extract_searchable_text
 from trace_marketplace.ui.queries import ListFilters, list_trace_ids
 
 log = logging.getLogger(__name__)
@@ -124,6 +131,135 @@ def run_nl_search(
     )
 
 
+@dataclass(frozen=True)
+class EmbedAndSimilarResult:
+    """Outcome of :func:`embed_and_recommend_similar`.
+
+    Used by the slice 5 upload flow to surface "here are some related
+    traces you should check out" immediately after ingest. Three
+    invariants worth knowing:
+
+    * ``embedded`` is True iff the OpenAI call succeeded AND the row
+      was persisted to ``trace_embeddings``. Subsequent searches will
+      include this trace.
+    * ``similar`` is empty when the search corpus is still empty
+      (slice 6's backfill hasn't run on this DB yet) OR when no
+      vectors clear the cosine threshold. We never return ``similar``
+      hits without having embedded the source trace first.
+    * ``skipped_reason`` is set when we *deliberately* short-circuited
+      (missing API key, unparseable ATIF). It's UI copy, not a
+      stacktrace -- shown verbatim under the upload result.
+    """
+
+    embedded: bool
+    similar: list[SimilarityHit] = field(default_factory=list)
+    skipped_reason: str | None = None
+
+
+def embed_and_recommend_similar(
+    conn: sqlite3.Connection,
+    trace_id: str,
+    *,
+    top_k: int = 5,
+) -> EmbedAndSimilarResult:
+    """Embed a freshly-ingested trace + return up to ``top_k`` similar traces.
+
+    Called by :mod:`trace_marketplace.ui.upload_view` right after the
+    rule-based pass. Designed to *never* raise: every failure mode is
+    captured as a ``skipped_reason`` string the upload UI renders as a
+    small caption. This matches the rule-pass behaviour ("trace is
+    still ingested even if the enrichment step fails") and means a
+    transient OpenAI outage can't tank uploads.
+
+    The function does its own cost gate: if ``OPENAI_API_KEY`` is
+    unset we exit before any API call. On Streamlit Cloud the key
+    lives in Secrets; locally it comes from the shell env that
+    launched ``streamlit run``.
+
+    Parameters
+    ----------
+    conn
+        Open SQLite connection. Reads ``atif`` + ``failure_label`` +
+        ``failure_label_reasoning`` for the trace; writes the embedding
+        + hash into ``trace_embeddings``.
+    trace_id
+        Primary key of the row just ingested.
+    top_k
+        How many neighbours to return for the upload-page panel.
+        Five is enough to give the user three or four interesting
+        clicks without overflowing the result card.
+    """
+    if not os.environ.get("OPENAI_API_KEY"):
+        return EmbedAndSimilarResult(
+            embedded=False,
+            skipped_reason=(
+                "OPENAI_API_KEY not configured -- similar-trace lookup "
+                "is skipped on upload. Run "
+                "`scripts/generate_embeddings.py` later, or set the key "
+                "in the Streamlit Cloud secrets, to enable this."
+            ),
+        )
+
+    row = conn.execute(
+        "SELECT atif, failure_label, failure_label_reasoning FROM traces WHERE id = ?",
+        (trace_id,),
+    ).fetchone()
+    if row is None or not row["atif"]:
+        return EmbedAndSimilarResult(
+            embedded=False,
+            skipped_reason=(
+                "No normalised ATIF on this trace, so there's nothing "
+                "to embed. Similar-trace lookup is available for ATIF, "
+                "Claude Code, Codex, Cursor, and SWE-agent formats."
+            ),
+        )
+
+    try:
+        atif = json.loads(row["atif"])
+    except json.JSONDecodeError as exc:
+        log.warning(
+            "trace %s: skipping embed, ATIF column is malformed JSON (%s)",
+            trace_id,
+            exc,
+        )
+        return EmbedAndSimilarResult(
+            embedded=False,
+            skipped_reason=f"ATIF blob is not valid JSON ({exc}).",
+        )
+
+    text = extract_searchable_text(
+        atif,
+        failure_label=row["failure_label"],
+        failure_label_reasoning=row["failure_label_reasoning"],
+    )
+
+    try:
+        vector = embed_text(text)
+    except Exception as exc:  # network / auth / quota -- treat as soft
+        log.exception("OpenAI embed_text failed for %s", trace_id)
+        return EmbedAndSimilarResult(
+            embedded=False,
+            skipped_reason=f"OpenAI embedding call failed: {exc}",
+        )
+
+    try:
+        store_embedding(
+            conn,
+            trace_id=trace_id,
+            embedding=vector,
+            source_text_hash=hash_source_text(text),
+        )
+    except Exception as exc:  # pragma: no cover -- sqlite failures are rare
+        log.exception("store_embedding failed for %s", trace_id)
+        return EmbedAndSimilarResult(
+            embedded=False,
+            skipped_reason=f"Embedded OK but DB write failed: {exc}",
+        )
+
+    hits = find_similar(conn, vector, exclude_ids=[trace_id], top_k=top_k)
+    return EmbedAndSimilarResult(embedded=True, similar=hits, skipped_reason=None)
+
+
 def run_find_similar(
     conn: sqlite3.Connection,
     trace_id: str,
@@ -156,4 +292,10 @@ def run_find_similar(
     return NLSearchResult(parsed=None, hits=hits, candidate_count=len(hits), error=None)
 
 
-__all__ = ["NLSearchResult", "run_find_similar", "run_nl_search"]
+__all__ = [
+    "EmbedAndSimilarResult",
+    "NLSearchResult",
+    "embed_and_recommend_similar",
+    "run_find_similar",
+    "run_nl_search",
+]
