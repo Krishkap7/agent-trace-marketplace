@@ -20,6 +20,12 @@ dependencies = [
     "openai>=1.50,<3.0",
     "pyarrow>=15.0.0",
     "streamlit>=1.40,<2.0",
+    # watchdog backs scripts/auto_upload.py (filesystem observer for
+    # ~/.claude/projects and ~/.codex/sessions). 4.x is the current
+    # stable line; the FileSystemEventHandler / Observer / event APIs
+    # we use are unchanged since 3.x so the upper bound is just guard-
+    # railing a hypothetical 5.x refactor.
+    "watchdog>=4.0,<5.0",
 ]
 
 [build-system]
