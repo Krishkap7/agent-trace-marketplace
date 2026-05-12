@@ -243,6 +243,36 @@ def _validate_distribution(distribution: dict[str, float]) -> None:
         )
 
 
+def resolve_label_distribution(
+    label_distribution: dict[str, float] | None,
+    *,
+    failure_ratio: float = 0.75,
+) -> dict[str, float]:
+    """Resolve the distribution :func:`sample_specs` will actually use.
+
+    Single source of truth for the three-way precedence rule so the
+    CLI dry-run can display *exactly* what the sampler will execute,
+    without duplicating the conditional in two places:
+
+    * ``None`` -> the demo default (:data:`DEFAULT_LABEL_DISTRIBUTION`).
+    * ``{}``   -> legacy "even split across non-success labels"
+      derived from ``failure_ratio``.
+    * non-empty dict -> use as-is (validated).
+
+    Returns a fresh dict the caller is free to mutate.
+    """
+    if label_distribution is None:
+        distribution = dict(DEFAULT_LABEL_DISTRIBUTION)
+    elif not label_distribution:
+        if not 0.0 <= failure_ratio <= 1.0:
+            raise ValueError("failure_ratio must be in [0, 1]")
+        distribution = _distribution_from_failure_ratio(failure_ratio)
+    else:
+        distribution = dict(label_distribution)
+    _validate_distribution(distribution)
+    return distribution
+
+
 def _distribution_from_failure_ratio(failure_ratio: float) -> dict[str, float]:
     """Build the legacy "even split across all 9 failure labels" distribution.
 
@@ -398,20 +428,9 @@ def sample_specs(
     if count < 0:
         raise ValueError("count must be non-negative")
 
-    # Resolve which distribution to use:
-    # * Explicit dict (including the default) -> use as-is.
-    # * Explicit empty dict {} -> backwards-compat: build from
-    #   failure_ratio (legacy even-split-across-9 behaviour).
-    # * None -> default demo distribution.
-    if label_distribution is None:
-        distribution = dict(DEFAULT_LABEL_DISTRIBUTION)
-    elif not label_distribution:
-        if not 0.0 <= failure_ratio <= 1.0:
-            raise ValueError("failure_ratio must be in [0, 1]")
-        distribution = _distribution_from_failure_ratio(failure_ratio)
-    else:
-        distribution = dict(label_distribution)
-    _validate_distribution(distribution)
+    distribution = resolve_label_distribution(
+        label_distribution, failure_ratio=failure_ratio
+    )
 
     rng = random.Random(seed)
 

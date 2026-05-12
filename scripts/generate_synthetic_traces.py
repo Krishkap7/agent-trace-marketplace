@@ -66,9 +66,9 @@ from trace_marketplace.synth.llm_generator import (
 )
 from trace_marketplace.synth.spec import (
     ALL_FORMATS,
-    DEFAULT_LABEL_DISTRIBUTION,
     FORMAT_EXTENSIONS,
     TraceSpec,
+    resolve_label_distribution,
     sample_specs,
 )
 
@@ -329,15 +329,18 @@ def _print_dry_run(
     projection: dict[str, Any],
     *,
     distribution: dict[str, float] | None,
+    failure_ratio: float,
 ) -> None:
     """Render the dry-run summary including the active distribution.
 
-    When ``distribution`` is None we print the default demo
-    distribution (the path most users hit) so a glance at dry-run
-    output answers "is this the shape I asked for?" without grepping
-    the source.
+    Mirrors :func:`sample_specs`'s three-way precedence
+    (``None`` -> default, ``{}`` -> legacy ``failure_ratio``, dict ->
+    as-is) via :func:`resolve_label_distribution` so the "Active label
+    distribution (target)" the user sees here is byte-for-byte what
+    the sampler will use on the live run. Previously the legacy
+    ``{}`` path silently fell back to the demo default when printed.
     """
-    active = distribution if distribution else dict(DEFAULT_LABEL_DISTRIBUTION)
+    active = resolve_label_distribution(distribution, failure_ratio=failure_ratio)
     print()
     print("=" * 60)
     print("DRY RUN -- no Anthropic API calls")
@@ -846,7 +849,11 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.dry_run:
         projection = _project_cost(specs)
-        _print_dry_run(projection, distribution=distribution)
+        _print_dry_run(
+            projection,
+            distribution=distribution,
+            failure_ratio=args.failure_ratio,
+        )
         return 0
 
     return _run_live(args, specs)

@@ -266,18 +266,60 @@ def test_rate_limit_retry_with_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
     assert len(slept) == 1
 
 
+def test_persistent_5xx_propagates_not_asserts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for the assertion crash on 5xx-only with low retry count.
+
+    The old retry loop only tracked rate-limit errors; if every
+    attempt was a 5xx (and the budget < 3) the loop would exit
+    without raising and trip ``assert last_429 is not None``. Now
+    both error types share one retry budget and the final 5xx is
+    surfaced as the real failure cause.
+    """
+    from anthropic import APIStatusError
+
+    monkeypatch.setattr(
+        "trace_marketplace.synth.llm_generator.time.sleep",
+        lambda _d: None,
+    )
+
+    class _Always5xx:
+        def __init__(self) -> None:
+            self.messages = self
+            self.calls = 0
+
+        def create(self, **_kwargs: Any) -> _FakeMessage:
+            self.calls += 1
+            raise APIStatusError(
+                "overloaded",
+                response=_DummyResponse(status_code=529),  # type: ignore[arg-type]
+                body=None,
+            )
+
+    client = _Always5xx()
+    with pytest.raises(APIStatusError):
+        generate_trace(
+            _spec(),
+            client=client,
+            validate_fn=lambda fmt, text: _ok_validation(text),
+            max_429_retries=2,
+        )
+    assert client.calls == 2
+
+
 # ---------------------------------------------------------------------------
-# Helper for the rate-limit test.
+# Helper for the rate-limit / 5xx tests.
 # ---------------------------------------------------------------------------
 
 
 class _DummyResponse:
-    """Tiny stand-in for ``httpx.Response`` used in RateLimitError construction."""
+    """Tiny stand-in for ``httpx.Response`` used in Anthropic error construction."""
 
-    status_code = 429
     headers: dict[str, str] = {}
 
-    def __init__(self) -> None:
+    def __init__(self, *, status_code: int = 429) -> None:
+        self.status_code = status_code
         self.request = self
 
     def json(self) -> dict[str, Any]:

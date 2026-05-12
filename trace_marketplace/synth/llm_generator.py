@@ -204,14 +204,17 @@ def _create_with_retry(
     tools: list[dict[str, Any]],
     max_429_retries: int = DEFAULT_RATE_LIMIT_RETRIES,
 ) -> Any:
-    """Call ``client.messages.create`` with exponential backoff on 429s.
+    """Call ``client.messages.create`` with exponential backoff on transient errors.
 
-    All other API errors (auth, 500, malformed request) propagate
-    immediately -- they aren't transient.
+    Both 429 (rate-limit) and 5xx (server overload, e.g. Anthropic's
+    ``529 overloaded_error`` during fleet spikes) get the same retry
+    budget: they're the same kind of "try again in a second" failure
+    from the caller's perspective. 4xx (other than 429) are
+    configuration errors -- they propagate immediately.
 
     Returns the raw SDK response. Caller handles content extraction.
     """
-    last_429: RateLimitError | None = None
+    last_transient: Exception | None = None
     for attempt in range(1, max_429_retries + 1):
         try:
             return client.messages.create(
@@ -224,7 +227,7 @@ def _create_with_retry(
                 messages=[{"role": "user", "content": user_message}],
             )
         except RateLimitError as exc:
-            last_429 = exc
+            last_transient = exc
             log.warning(
                 "Anthropic rate-limited (attempt %d/%d); backing off",
                 attempt,
@@ -234,19 +237,26 @@ def _create_with_retry(
                 break
             _sleep_for_rate_limit(attempt)
         except APIStatusError as exc:
-            # 5xx are sometimes transient too; retry like 429 but
-            # only twice. 4xx (other than 429) are configuration
-            # errors -- bubble up.
             status = getattr(exc, "status_code", None)
-            if status is not None and 500 <= int(status) < 600 and attempt < 3:
-                log.warning(
-                    "Anthropic %s on attempt %d; retrying", status, attempt
-                )
-                _sleep_for_rate_limit(attempt)
-                continue
-            raise
-    assert last_429 is not None  # noqa: S101
-    raise last_429
+            if status is None or not (500 <= int(status) < 600):
+                # 4xx (other than 429, already handled above) -- not
+                # transient, fail loudly.
+                raise
+            last_transient = exc
+            log.warning(
+                "Anthropic %s on attempt %d/%d; retrying",
+                status,
+                attempt,
+                max_429_retries,
+            )
+            if attempt == max_429_retries:
+                break
+            _sleep_for_rate_limit(attempt)
+    # We only exit the loop after exhausting retries on a transient
+    # error -- success paths return inside the try, non-transient
+    # errors raise. So ``last_transient`` is always set here.
+    assert last_transient is not None  # noqa: S101
+    raise last_transient
 
 
 # ---------------------------------------------------------------------------
