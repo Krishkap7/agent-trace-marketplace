@@ -184,6 +184,23 @@ _GLOBAL_CSS: str = """
         color: rgba(244, 235, 225, 0.45);
         white-space: nowrap;
     }
+    /* Compressed-thread elision marker. When detail_view skips middle
+       steps to keep the websocket payload under Streamlit's message
+       size limit, this is the placeholder block the user sees between
+       the head and tail slices. Visual treatment matches the muted
+       metadata styling of timestamps so it doesn't compete with
+       actual step rows. */
+    .tm-step-elision {
+        margin: 1.25rem 0;
+        padding: 0.85rem 1rem;
+        text-align: center;
+        font-family: ui-monospace, "SF Mono", Menlo, monospace;
+        font-size: 0.85rem;
+        color: rgba(244, 235, 225, 0.55);
+        background: rgba(244, 235, 225, 0.04);
+        border-radius: 8px;
+        border: 1px dashed rgba(244, 235, 225, 0.2);
+    }
     .tm-row-head {
         display: flex;
         align-items: baseline;
@@ -891,17 +908,37 @@ def render_header(trace_row: dict[str, Any]) -> None:
             f"**Judge reasoning** (Sonnet 4.6)\n\n> {reasoning.strip()}",
             icon=":material/psychology:",
         )
-    elif has_error in (0, 1):
-        # Tell the user *why* there's no judge output here so a clean
-        # success doesn't read as "the feature is broken". The judge
-        # only ran on all has_error=1 + a 10% sample of has_error=0,
-        # so 91% of clean successes legitimately don't have a label.
+    elif has_error == 0:
+        # Clean success path: the judge only labels a 10% sample of
+        # has_error=0 traces to keep batch costs down, so 90% of clean
+        # successes legitimately don't have a label and that's not a
+        # bug. Mention the sample rate explicitly so the user knows
+        # the lever to pull if they want full coverage.
         st.caption(
-            "_Not classified by the LLM judge._  Only `has_error=1` "
-            "traces plus a deterministic 10% sample of clean successes "
-            "(seed 42) were sent to Sonnet 4.6 -- this row wasn't "
-            "in the sample. Re-run `scripts/judge_failures.py` with a "
-            "larger sample rate to include it."
+            "_Not classified by the LLM judge._  This row is a clean "
+            "success (`has_error=0`). The judge only labels a "
+            "deterministic 10% sample of clean successes (seed 42) "
+            "to keep batch costs down; re-run `scripts/judge_failures.py` "
+            "with a larger sample rate to include it."
+        )
+    elif has_error == 1:
+        # Failed path: this row SHOULD have been judged but wasn't.
+        # Almost always means it was added (uploaded, auto-upload
+        # daemon, or backfill) after the last batch run of
+        # ``scripts/judge_failures.py``. Fresh uploads land with
+        # ``failure_label = NULL`` by design -- per-upload Sonnet
+        # calls would be 5-30 s of user-facing latency and unbounded
+        # cost, so the judge stays a batch job. The next batch run
+        # picks this row up via its existing ``WHERE failure_label
+        # IS NULL`` gate.
+        st.caption(
+            "_Not classified by the LLM judge yet._  This row is "
+            "flagged as a failure (`has_error=1`) but the Sonnet 4.6 "
+            "judge hasn't seen it. The judge runs as a batch job "
+            "(`scripts/judge_failures.py`) -- fresh uploads land with "
+            "`failure_label = NULL` and get picked up on the next "
+            "batch run via the script's existing `WHERE failure_label "
+            "IS NULL` gate."
         )
 
 

@@ -59,12 +59,100 @@ def _decode_atif(blob: str | None) -> dict[str, Any] | None:
     return decoded if isinstance(decoded, dict) else None
 
 
-def _render_thread(atif: dict[str, Any]) -> None:
+_THREAD_RENDER_SOFT_CAP: int = 130
+"""Total steps above which the thread renders in compressed form by
+default. Picked empirically: each step ranges from ~2-10 KB of HTML +
+markdown, so ~130 steps lands comfortably under Streamlit Cloud's
+~3.5 MB websocket message budget while still covering the full thread
+for the vast majority of traces (the corpus median is ~30 steps, p95
+~200). Larger thresholds risk re-tripping the RangeError that 1000+
+step traces hit before we added this gate."""
+
+_THREAD_HEAD_COUNT: int = 30
+"""How many leading steps to show in compressed mode. Front-of-trace is
+where the user prompt + task framing live -- enough context to know
+what the agent was trying to do."""
+
+_THREAD_TAIL_COUNT: int = 100
+"""How many trailing steps to show in compressed mode. Tail is where
+failures usually manifest, so we keep proportionally more here than
+at the head."""
+
+_THREAD_RENDER_ALL_KEY: str = "_detail_render_full_thread_for"
+"""Session-state slot holding the trace_id whose full thread the user
+explicitly asked to render. We key by trace_id so navigating to a
+different detail page silently resets the toggle (no stale "render
+all" state leaking across traces)."""
+
+
+def _render_thread(atif: dict[str, Any], trace_id: str) -> None:
+    """Render the conversation thread, compressing for huge traces.
+
+    For traces under :data:`_THREAD_RENDER_SOFT_CAP` steps we render
+    everything inline. Above that we default to first
+    :data:`_THREAD_HEAD_COUNT` + last :data:`_THREAD_TAIL_COUNT` steps
+    plus a placeholder, with an explicit button to opt into the full
+    render. This protects against Streamlit Cloud's websocket message
+    size limit (the user hit ``RangeError: index out of range`` on a
+    1169-step trace whose full render exceeded ~5 MB; the limit is
+    ~3.5 MB). The full thread is always still available via the
+    "View normalised ATIF" expander at the bottom.
+    """
     steps = atif.get("steps") or []
     if not steps:
         st.info("ATIF parsed but contains no steps.")
         return
-    for idx, step in enumerate(steps):
+
+    total = len(steps)
+
+    # The full-render opt-in is keyed by trace_id so toggling for one
+    # trace doesn't carry over to another. Reading session_state
+    # defensively because the key may not exist yet.
+    render_all = st.session_state.get(_THREAD_RENDER_ALL_KEY) == trace_id
+
+    if total <= _THREAD_RENDER_SOFT_CAP or render_all:
+        for idx, step in enumerate(steps):
+            if isinstance(step, dict):
+                render_step(step, idx)
+        return
+
+    head_end = _THREAD_HEAD_COUNT
+    tail_start = total - _THREAD_TAIL_COUNT
+    omitted = tail_start - head_end
+    st.caption(
+        f"_Showing first {_THREAD_HEAD_COUNT} + last "
+        f"{_THREAD_TAIL_COUNT} of {total} steps. The full trace is "
+        "available via the 'View normalised ATIF' expander at the "
+        "bottom of the page._"
+    )
+    if st.button(
+        f"Render all {total} steps inline",
+        key=f"render_full_thread_{trace_id}",
+        help=(
+            "Forces the full conversation thread into this page. May "
+            "exceed Streamlit's websocket message budget on very long "
+            "traces (rule of thumb: traces over ~800 steps); if the "
+            "page goes blank with a 'Failed to process Websocket "
+            "message' error, reload and stick with the compressed view."
+        ),
+    ):
+        st.session_state[_THREAD_RENDER_ALL_KEY] = trace_id
+        st.rerun()
+
+    for idx in range(head_end):
+        step = steps[idx]
+        if isinstance(step, dict):
+            render_step(step, idx)
+
+    st.markdown(
+        f"<div class='tm-step-elision'>(... {omitted} middle steps "
+        f"omitted to keep the page under Streamlit's message size "
+        f"limit ...)</div>",
+        unsafe_allow_html=True,
+    )
+
+    for idx in range(tail_start, total):
+        step = steps[idx]
         if isinstance(step, dict):
             render_step(step, idx)
 
@@ -213,7 +301,7 @@ def render(conn: sqlite3.Connection, trace_id: str) -> None:
             agent_summary_bits.append(f"notes: {notes}")
         if agent_summary_bits:
             st.caption(" · ".join(agent_summary_bits))
-        _render_thread(atif)
+        _render_thread(atif, trace_id)
 
     st.divider()
     _render_raw_blob(row.get("raw_blob") or "")
