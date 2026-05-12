@@ -97,6 +97,66 @@ def test_handler_ignores_directory_events() -> None:
     assert handler.last_modified == {}
 
 
+def _fake_moved_event(src_path: str, dest_path: str, is_directory: bool = False):
+    """Stand-in for watchdog's ``FileMovedEvent``.
+
+    The real event class has both ``src_path`` and ``dest_path``; we
+    forward both because the handler reads ``dest_path`` (the
+    rename target) and falls back to ``src_path`` if ``dest_path``
+    is missing.
+    """
+
+    class _E:
+        pass
+
+    e = _E()
+    e.src_path = src_path
+    e.dest_path = dest_path
+    e.is_directory = is_directory
+    return e
+
+
+def test_handler_records_moved_files_by_destination() -> None:
+    """Atomic-write rename pattern is captured via on_moved.
+
+    Regression for the Cursor bugbot finding on PR #11 commit 09c1e2d:
+    Linux's inotify reports ``open(tempfile) -> write -> rename(tempfile,
+    target)`` as a single ``on_moved`` event, not the ``on_modified``
+    /``on_created`` pair that file editors usually trigger. Without an
+    ``on_moved`` handler the daemon would silently miss any agent that
+    uses the standard atomic-write pattern.
+    """
+    handler = SessionHandler()
+
+    handler.on_moved(_fake_moved_event("/tmp/.session.jsonl.swp", "/tmp/session.jsonl"))
+
+    assert Path("/tmp/session.jsonl") in handler.last_modified
+    assert Path("/tmp/.session.jsonl.swp") not in handler.last_modified
+
+
+def test_handler_ignores_non_jsonl_moves() -> None:
+    """A move whose destination isn't a .jsonl is dropped."""
+    handler = SessionHandler()
+
+    handler.on_moved(_fake_moved_event("/tmp/old.log", "/tmp/new.log"))
+
+    assert handler.last_modified == {}
+
+
+def test_handler_skips_moves_without_dest_path() -> None:
+    """An ``on_moved`` event without a usable dest_path is a no-op.
+
+    Some platform-specific event classes (or future watchdog
+    versions) might not populate dest_path; we treat that defensively
+    rather than crashing the observer thread.
+    """
+    handler = SessionHandler()
+
+    handler.on_moved(_fake_moved_event("/tmp/old.jsonl", "", is_directory=False))
+
+    assert handler.last_modified == {}
+
+
 def test_staged_path_routes_known_sources() -> None:
     """Paths under the two supported roots route to the matching staging tree."""
     claude = CLAUDE_DIR / "projA" / "abc.jsonl"

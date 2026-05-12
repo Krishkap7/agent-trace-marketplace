@@ -93,6 +93,25 @@ class SessionHandler(FileSystemEventHandler):
     def on_created(self, event: FileSystemEvent) -> None:
         self._record(event.src_path, event.is_directory)
 
+    def on_moved(self, event: FileSystemEvent) -> None:
+        """Record the destination of a moved/renamed file.
+
+        Linux's inotify reports the standard atomic-write pattern
+        (write to a tempfile in the same dir, then ``rename(2)`` into
+        place) as a single ``on_moved`` event -- no preceding
+        ``on_modified`` / ``on_created``. macOS' FSEvents collapses
+        the sequence differently. Watchdog smooths the platforms out
+        but only as far as firing the right callback; if we only
+        handle modified+created we miss any atomic-write producer
+        the moment Claude Code or Codex (or a future agent harness)
+        adopts that pattern. We record the ``dest_path`` because the
+        source is a tempfile that's already gone by the time we'd
+        try to ingest it.
+        """
+        dest = getattr(event, "dest_path", None)
+        if dest:
+            self._record(dest, event.is_directory)
+
 
 def get_settled(handler: SessionHandler, debounce: float) -> list[Path]:
     """Return + clear files whose last write was at least ``debounce`` seconds ago.
@@ -149,24 +168,36 @@ def staged_path(source: Path) -> Path | None:
 
 
 def process(source: Path, conn: sqlite3.Connection) -> None:
-    """Copy + ingest + enrich one session file. Must never raise.
+    """Copy + ingest + (conditionally) enrich one session file.
 
     Mirrors the upload page's per-file flow
     (``trace_marketplace.ui.upload_view._process_upload``):
 
-    1. ``shutil.copy2`` into ``data/raw/<format>/`` so the trace has a
-       stable on-disk home outside ``~/.claude`` / ``~/.codex`` (those
-       dirs get rotated/deleted by the agents themselves).
-    2. ``ingest_file`` -> writes raw_blob + ATIF.
-    3. ``persist_signals_for_trace`` -> rule-based ``failure_signals``
-       and, if ``has_error`` was previously NULL, the boolean too.
-    4. ``embed_and_recommend_similar`` -> OpenAI embedding (gated on
-       ``OPENAI_API_KEY``; never raises) so the new trace is
-       immediately searchable from the NL query box.
+    1. ``shutil.copy2`` into the nested ``data/raw/<format>/<...>/``
+       slot derived by :func:`staged_path` so the trace has a stable
+       on-disk home outside ``~/.claude`` / ``~/.codex`` (those dirs
+       get rotated/deleted by the agents themselves).
+    2. ``ingest_file`` -> always runs; writes raw_blob + (if the
+       adapter validated) ATIF.
+    3. If ``ingest_result.validated`` is true, run the enrichment
+       pair just like the upload view does:
 
-    Every failure path logs and returns -- a malformed adapter, a
-    missing API key, even a vanished source file are all "log it and
-    keep watching" cases.
+       * ``persist_signals_for_trace`` -> rule-based
+         ``failure_signals`` and, if ``has_error`` was previously
+         NULL, the boolean too.
+       * ``embed_and_recommend_similar`` -> OpenAI embedding (gated
+         on ``OPENAI_API_KEY``; never raises) so the new trace is
+         immediately searchable from the NL query box.
+
+    Raw-blob-only rows (adapter failure / unknown format) skip the
+    enrichment pair: there's no ATIF to compute signals against or
+    text to embed, so the calls would be no-ops at best and a
+    breakage vector at worst if a future enrichment step doesn't
+    null-check as gracefully as today's pair.
+
+    Must never raise. Every failure path logs and returns -- a
+    malformed adapter, a missing API key, even a vanished source
+    file are all "log it and keep watching" cases.
     """
     try:
         if not source.exists():
@@ -185,25 +216,34 @@ def process(source: Path, conn: sqlite3.Connection) -> None:
         conn.commit()
         trace_id = result.trace_id
 
-        row = conn.execute(
-            "SELECT atif FROM traces WHERE id = ?", (trace_id,)
-        ).fetchone()
-        atif_text = row["atif"] if row is not None else None
-        signals = persist_signals_for_trace(conn, trace_id, atif_text)
-        conn.commit()
-        fired = sorted(k for k, v in (signals or {}).items() if v)
-
-        embed = embed_and_recommend_similar(conn, trace_id, top_k=3)
-
         validated = "validated" if result.validated else "raw_blob only"
         log.info("ingested %s -> trace_id=%s (%s)", source.name, trace_id, validated)
-        if fired:
-            log.info("  signals: %s", fired)
-        if embed.skipped_reason:
-            log.info("  embedding skipped: %s", embed.skipped_reason)
-        elif embed.similar:
-            preview = ", ".join(hit.trace_id for hit in embed.similar[:3])
-            log.info("  similar: %s", preview)
+
+        # Enrichment is guarded by ``result.validated`` to match
+        # ``trace_marketplace.ui.upload_view._process_upload``. Raw-
+        # blob-only rows (adapter failure / unknown format) have no
+        # ATIF column, so the rule pass and embedding step have
+        # nothing to operate on -- both helpers degrade gracefully
+        # today, but mirroring the upload view's guard keeps the
+        # contract documented in the docstring honest and protects
+        # against a future enrichment step that's less forgiving.
+        if result.validated:
+            row = conn.execute(
+                "SELECT atif FROM traces WHERE id = ?", (trace_id,)
+            ).fetchone()
+            atif_text = row["atif"] if row is not None else None
+            signals = persist_signals_for_trace(conn, trace_id, atif_text)
+            conn.commit()
+            fired = sorted(k for k, v in (signals or {}).items() if v)
+            if fired:
+                log.info("  signals: %s", fired)
+
+            embed = embed_and_recommend_similar(conn, trace_id, top_k=3)
+            if embed.skipped_reason:
+                log.info("  embedding skipped: %s", embed.skipped_reason)
+            elif embed.similar:
+                preview = ", ".join(hit.trace_id for hit in embed.similar[:3])
+                log.info("  similar: %s", preview)
     except Exception as exc:
         log.warning("- %s: %s", source.name, exc)
 
