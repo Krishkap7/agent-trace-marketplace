@@ -165,15 +165,23 @@ def _build_where(filters: ListFilters) -> tuple[str, list[Any]]:
     # EXISTS clause naturally filters out rows whose
     # ``failure_events`` is still NULL (i.e. the events extractor
     # hasn't run on them yet).
+    #
+    # The two compound clauses below are wrapped in parens defensively:
+    # AND-only joining makes them safe at the top level today, but the
+    # implicit contract of this builder is "each clauses entry is an
+    # atomic predicate". A future refactor that introduces OR at the
+    # outer level would silently produce wrong results without the
+    # parens. The pattern matches the search-needle compound on
+    # line 160 for consistency.
     if filters.has_unrecovered_failures:
         clauses.append(
             "EXISTS (SELECT 1 FROM json_each(failure_events) "
             "WHERE json_extract(value, '$.recovered') = 0)"
         )
     if filters.recovered_failures_only:
-        clauses.append("has_error = 1 AND ultimately_succeeded = 1")
+        clauses.append("(has_error = 1 AND ultimately_succeeded = 1)")
     if filters.clean_successes_only:
-        clauses.append("has_error = 0 AND ultimately_succeeded = 1")
+        clauses.append("(has_error = 0 AND ultimately_succeeded = 1)")
 
     where_sql = " AND ".join(clauses) if clauses else "1=1"
     return where_sql, params

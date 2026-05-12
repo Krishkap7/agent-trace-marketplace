@@ -435,13 +435,16 @@ def _run_live(
     targets: list[_Row],
     *,
     max_spend_usd: float,
-    limit: int | None,
     workers: int,
 ) -> int:
-    """Extract events for ``targets`` in parallel, persist on the main thread."""
+    """Extract events for ``targets`` in parallel, persist on the main thread.
+
+    ``targets`` is expected to already have ``--limit`` applied by the
+    caller (see :func:`main`); we no longer trim here so dry-run and
+    live paths see the same list and ``_print_dry_run`` can be a
+    faithful preview of what ``--confirm`` would burn.
+    """
     require_api_key()
-    if limit is not None:
-        targets = targets[: max(0, int(limit))]
     workers = max(1, min(int(workers), MAX_WORKERS, len(targets) or 1))
 
     _, _, expected_usd, worst_usd = _project_costs(len(targets))
@@ -567,6 +570,20 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0
 
+        # Apply --limit BEFORE branching so dry-run and live see the
+        # exact same target list. Previously --limit was honoured only
+        # inside _run_live, which made ``--dry-run --limit 5`` project
+        # the cost for the full corpus -- misleading and defeats the
+        # purpose of dry-run as a preview.
+        if args.limit is not None:
+            targets = targets[: max(0, int(args.limit))]
+            if not targets:
+                print(
+                    f"--limit {args.limit} reduces the selection to zero "
+                    "traces; nothing to do."
+                )
+                return 0
+
         # Default and --dry-run both go to the dry-run path; live calls
         # require --confirm. Mixed flags (--dry-run + --confirm) treat
         # --dry-run as the operator opting back out at the last second.
@@ -577,7 +594,6 @@ def main(argv: list[str] | None = None) -> int:
             conn,
             targets,
             max_spend_usd=args.max_spend_usd,
-            limit=args.limit,
             workers=args.max_workers,
         )
 
