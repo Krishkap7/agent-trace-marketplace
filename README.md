@@ -4,7 +4,9 @@ A failure-mode search engine for coding-agent traces. See [trace-marketplace-con
 
 ## Status
 
-**Slice 2.6 (current):** Codex (OpenAI `~/.codex/sessions/*.jsonl` rollouts) and Cursor (project-defined v1 export envelope) adapters. Both ship with deterministic synthetic-fixture generators (4 success / 3 failure / 2 short / 1 long per format) plus 6 named ground-truth failure modes (`hallucinated_api`, `infinite_retry_loop`, `ignored_test_failure`, `broke_working_code`, `wrong_file_edited`, `premature_conclusion`) propagated into `trajectory.extra.synthetic_failure_mode` for downstream search evaluation.
+**Slice 3 (current):** Streamlit UI viewer. Filterable, paginated list view + URL-linkable detail view that renders the ATIF as a readable conversation thread (italic reasoning, encrypted-reasoning badge, collapsible tool calls / observations). Falls back to raw blob for `atif IS NULL` traces. SQL helpers live in `trace_marketplace/ui/queries.py` and are unit-tested without Streamlit.
+
+**Slice 2.6:** Codex (OpenAI `~/.codex/sessions/*.jsonl` rollouts) and Cursor (project-defined v1 export envelope) adapters. Both ship with deterministic synthetic-fixture generators (4 success / 3 failure / 2 short / 1 long per format) plus 6 named ground-truth failure modes (`hallucinated_api`, `infinite_retry_loop`, `ignored_test_failure`, `broke_working_code`, `wrong_file_edited`, `premature_conclusion`) propagated into `trajectory.extra.synthetic_failure_mode` for downstream search evaluation.
 
 **Slice 2.5:** SWE-agent HuggingFace adapter. Bulk-ingests a stratified 500-row sample (250 success / 250 failure) from `nebius/SWE-agent-trajectories` and wires the `has_error` column generically off `trajectory.extra["resolved"]`.
 
@@ -56,6 +58,26 @@ End-to-end output should show 5 ATIF + 2 Claude Code + 500 SWE-agent + 10 Codex 
 
 For Claude Code ingest, drop session JSONL files into `data/raw/claude_code/` (these come from `~/.claude/projects/<dir>/<uuid>.jsonl` on a real install). Codex sessions live under `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl`; point `scripts/ingest_codex.py --raw-dir` at that directory to ingest real Codex rollouts. Cursor v1 envelope files use the `*.cursor.json` extension and follow the spec in `trace_marketplace/adapters/cursor.py`. All three real-data directories are gitignored.
 
+## View the marketplace
+
+After ingest, launch the Streamlit viewer:
+
+```bash
+bash scripts/run_ui.sh
+# or equivalently:
+uv run streamlit run trace_marketplace/ui/app.py
+```
+
+Opens `http://localhost:8501` on the list view. Sidebar filters narrow by `source_format`, `agent_name`, `model`, three-way `has_error` (errors / successes / unknown), `num_steps` range, and an `atif IS NULL` toggle for the raw-blob fallback path. The search box does case-insensitive substring matches across `id` / `agent_name` / `model`.
+
+Click any row to navigate to `?trace_id=<id>` — the URL is bookmarkable. The detail view renders the ATIF as a conversation thread (user / agent / system / tool sources visually distinguished), with tool calls and observations collapsed by default. Encrypted reasoning placeholders (`[encrypted reasoning, N bytes]`) show a lock badge so the slice 2.7 fix is visible in the UI. Raw blob + normalised ATIF are always available behind expanders for inspection. `atif IS NULL` traces (unknown formats / adapter failures) fall back to the raw blob automatically.
+
+![List view](docs/screenshots/list_view.png)
+
+![Detail view (ATIF)](docs/screenshots/detail_view.png)
+
+> Screenshots regenerated after each UI change — drop replacements into `docs/screenshots/`.
+
 ## Tests
 
 ```bash
@@ -80,6 +102,14 @@ trace_marketplace/
     pipeline.py            # detect → adapt → redact → insert (+ has_error)
   storage/
     db.py                  # SQLite schema + insert helper
+trace_marketplace/
+  ui/
+    __init__.py
+    app.py                 # 30-line router; reads st.query_params["trace_id"]
+    queries.py             # parameterised SQL helpers; no Streamlit import
+    components.py          # render_step / render_header / render_filters_summary
+    list_view.py           # sidebar filters + st.dataframe + manual pagination
+    detail_view.py         # header + conversation thread + raw-blob fallback
 scripts/
   download_corpus.py            # ATIF MCP traces → data/raw/<agent>/
   download_swe_agent.py         # nebius/SWE-agent-trajectories parquet → data/raw/swe_agent/
@@ -93,6 +123,7 @@ scripts/
   verify.py                     # SELECT + pretty-print + format/has_error breakdown
   breakdown.py                  # success/failure + synthetic failure-mode counts
   inspect_trace.py              # one-trace detail view
+  run_ui.sh                     # bash wrapper around `uv run streamlit run`
 tests/
   fixtures/
     claude_code_minimal.jsonl   # synthetic ~14-event Claude Code session
