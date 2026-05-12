@@ -275,9 +275,9 @@ def _extract_tool_payload(message_obj: Any) -> dict[str, Any] | None:
         )
         if name != _PARSE_TOOL["name"]:
             continue
-        payload = getattr(block, "input", None) or (
-            block.get("input") if isinstance(block, dict) else None
-        )
+        payload = getattr(block, "input", None)
+        if payload is None and isinstance(block, dict):
+            payload = block.get("input")
         if not isinstance(payload, dict):
             return None
         return payload

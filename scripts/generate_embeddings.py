@@ -41,7 +41,6 @@ import logging
 import sqlite3
 import sys
 from pathlib import Path
-from typing import Any
 
 from trace_marketplace.enrich.embeddings import (
     DEFAULT_BATCH_SIZE,
@@ -271,11 +270,6 @@ def main(argv: list[str] | None = None) -> int:
             )
         print(f"Stored {len(vectors)} embeddings.")
         return 0
-
-
-def _dump_candidate_text(_row: dict[str, Any]) -> None:  # pragma: no cover
-    """Internal debugging hook -- not wired to a CLI flag yet."""
-    pass
 
 
 if __name__ == "__main__":

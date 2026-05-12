@@ -199,16 +199,18 @@ def list_trace_ids(
     doesn't have to splice a giant ``limit`` argument into
     :func:`list_traces` to mean "give me everything".
 
-    Constrained to ``atif IS NOT NULL`` because rows without ATIF
-    have no embedding (the backfill skips them), so they can never
-    appear in a similarity ranking. Letting them through would
-    silently shrink the result set.
+    Callers that care about similarity ranking (the NL-search path)
+    must set ``filters.has_atif=True`` -- rows without ATIF have no
+    embedding (the backfill skips them), so they can never appear
+    in a ranking. We deliberately don't hardcode that constraint
+    here so the function stays general-purpose and the SQL only
+    contains the clauses :func:`_build_where` emits (no silent
+    duplicates, no surprise filtering when a future caller passes
+    ``has_atif=False``).
     """
     filters = filters or ListFilters()
     where_sql, params = _build_where(filters)
-    sql = (
-        f"SELECT id FROM traces WHERE {where_sql} AND atif IS NOT NULL ORDER BY id ASC"
-    )
+    sql = f"SELECT id FROM traces WHERE {where_sql} ORDER BY id ASC"
     cur = conn.execute(sql, params)
     return [row["id"] for row in cur.fetchall()]
 

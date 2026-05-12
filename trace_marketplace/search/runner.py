@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from trace_marketplace.enrich.embeddings import (
+    EMBEDDING_MODEL,
     embed_text,
     hash_source_text,
     load_embedding,
@@ -303,6 +304,14 @@ def run_find_similar(
                 "`scripts/generate_embeddings.py` to populate it."
             ),
         )
+    # Size of the *searchable pool* (every other embedded trace), not
+    # ``len(hits)`` which is capped at ``top_k``. Matches the
+    # ``candidate_count`` semantics ``run_nl_search`` uses, so the UI
+    # can render a consistent "k of N" hint regardless of code path.
+    candidate_count = conn.execute(
+        "SELECT COUNT(*) FROM trace_embeddings WHERE model = ? AND trace_id != ?",
+        (EMBEDDING_MODEL, trace_id),
+    ).fetchone()[0]
     try:
         hits = find_similar(
             conn,
@@ -320,10 +329,12 @@ def run_find_similar(
         return NLSearchResult(
             parsed=None,
             hits=[],
-            candidate_count=0,
+            candidate_count=candidate_count,
             error=f"Similar-trace lookup failed: {exc}",
         )
-    return NLSearchResult(parsed=None, hits=hits, candidate_count=len(hits), error=None)
+    return NLSearchResult(
+        parsed=None, hits=hits, candidate_count=candidate_count, error=None
+    )
 
 
 __all__ = [
