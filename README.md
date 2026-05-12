@@ -4,7 +4,9 @@ A failure-mode search engine for coding-agent traces. See [trace-marketplace-con
 
 ## Status
 
-**Slice 6 (current):** Embedding search + minimal NL query. Every trace with an ATIF blob gets a `text-embedding-3-small` vector cached in a new `trace_embeddings` table (idempotent on `source_text_hash`, ~$0.01 to backfill the full corpus). The list view gains a natural-language search box: Sonnet 4.6 parses the query into structured filters (`failure_label`, `source_format`, `agent_name`, `has_error`) plus a `semantic_intent` string, the intent is embedded once, and a brute-force numpy cosine NN ranks the filtered candidate pool. The detail view gains a **Find similar traces** button that runs the same NN against the current trace's cached vector (zero API cost, sub-100ms response). Both features degrade gracefully when `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` is missing.
+**Slice 7 (current):** Sonnet-authored synthetic corpus. A new orchestrator (`scripts/generate_synthetic_traces.py`) samples a configurable mix of `TraceSpec` recipes -- balanced 3-way across Claude Code / Codex / Cursor formats, 75% failures spread evenly over the 9 non-success labels, with 20% of failing traces carrying multi-mode complex failures -- and fans them out to `claude-sonnet-4-6` in parallel (default 30 workers) using Anthropic prompt caching on the static per-format spec block. Sonnet emits the raw on-disk JSONL/JSON via a single `submit_trace` tool; each response is run through the matching production adapter for validation, retried once with the adapter's complaint if rejected, and dropped otherwise. The orchestrator enforces a hard USD budget cap, supports `--dry-run` (cost projection) + `--probe-rate-limits` (tier sniff) before live execution, and writes a per-spec outcome manifest to `data/raw/synth_manifest.json`. Cost target: ~$30-45 for 500 traces, ~$60 ceiling with retries.
+
+**Slice 6:** Embedding search + minimal NL query. Every trace with an ATIF blob gets a `text-embedding-3-small` vector cached in a new `trace_embeddings` table (idempotent on `source_text_hash`, ~$0.01 to backfill the full corpus). The list view gains a natural-language search box: Sonnet 4.6 parses the query into structured filters (`failure_label`, `source_format`, `agent_name`, `has_error`) plus a `semantic_intent` string, the intent is embedded once, and a brute-force numpy cosine NN ranks the filtered candidate pool. The detail view gains a **Find similar traces** button that runs the same NN against the current trace's cached vector (zero API cost, sub-100ms response). Both features degrade gracefully when `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` is missing.
 
 **Slice 5:** Browser uploads. The Streamlit UI gained an upload page (`?page=upload`) that drag-drops or pastes a trace through the existing `ingest_file()` pipeline + the rule-based failure pass, so a freshly uploaded trace lands in the list view with `has_error` and `failure_signals` populated within a single page render. LLM-judge stays a batch job, deliberately -- per-upload Sonnet calls would be slow and unbounded; fresh uploads pick up a `failure_label` on the next `scripts/judge_failures.py` run via the existing `WHERE failure_label IS NULL` gate. Per-file isolation means one bad payload in a multi-file submission can't tank the rest.
 
@@ -169,6 +171,40 @@ ANTHROPIC_API_KEY = "sk-ant-..."
 
 Streamlit Cloud injects `secrets` entries into the process environment, so no code changes are needed. The UI degrades gracefully when either key is missing -- the NL search box surfaces a configuration hint instead of crashing.
 
+## Generate a synthetic corpus (slice 7)
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+
+# Always estimate first -- pure-Python sampling, no API calls.
+uv run python scripts/generate_synthetic_traces.py --dry-run
+
+# Optional: probe your account's Anthropic tier with 5 small calls
+# (~$0.05). Tells you whether to dial --max-workers up or down.
+uv run python scripts/generate_synthetic_traces.py --probe-rate-limits
+
+# Smoke run: 6 traces (2 per format), confirms adapters accept the
+# Sonnet output before you spend the full ~$40.
+uv run python scripts/generate_synthetic_traces.py --count 12 --limit 6
+
+# Live run: 500 traces, 75% failures, even split across formats,
+# capped at $80 cumulative spend.
+uv run python scripts/generate_synthetic_traces.py
+```
+
+Then re-feed the new traces through the existing pipeline:
+
+```bash
+uv run python scripts/ingest_claude_code.py
+uv run python scripts/ingest_codex.py
+uv run python scripts/ingest_cursor.py
+uv run python scripts/detect_failures.py
+uv run python scripts/judge_failures.py    # optional; ~$5 for ~280 calls
+uv run python scripts/generate_embeddings.py
+```
+
+Each generated trace carries a `synthetic_failure_mode` ground-truth tag inside `atif.extra` (queryable via `json_extract(atif, '$.extra.synthetic_failure_mode')`) so NL search results can be evaluated against the intended failure mode.
+
 ## Tests
 
 ```bash
@@ -206,6 +242,12 @@ trace_marketplace/
     similar.py             # numpy cosine nearest-neighbour (shared by NL + Find Similar)
     nl_query.py            # Anthropic tool-use NL parser
     runner.py              # glue: parse -> filter -> embed intent -> rank
+  synth/                   # slice 7: Sonnet-authored synthetic corpus
+    __init__.py
+    spec.py                # TraceSpec + balanced sample_specs(N, seed)
+    prompts.py             # per-format prompt builders + submit_trace tool schema
+    validator.py           # adapter wrapper -> (ok, error_string); step/tool-call floors
+    llm_generator.py       # single-trace Anthropic call with retry + cost tracking
   ui/
     __init__.py
     app.py                 # 3-route router (page=upload / trace_id / list)
@@ -231,6 +273,7 @@ scripts/
   validate_detection.py         # slice 4: precision/recall vs SWE-agent ground truth
   judge_failures.py             # slice 4: LLM-judge pass (Sonnet 4.6)
   generate_embeddings.py        # slice 6: text-embedding-3-small backfill (idempotent on source_text_hash)
+  generate_synthetic_traces.py  # slice 7: Sonnet-authored orchestrator (--dry-run / --probe-rate-limits / --budget)
   run_ui.sh                     # bash wrapper around `uv run streamlit run`
 tests/
   fixtures/
@@ -249,6 +292,10 @@ tests/
   test_embeddings.py            # slice 6: OpenAI client + float32 roundtrip + upsert
   test_similar.py               # slice 6: numpy cosine NN (pure, no mocks)
   test_nl_query.py              # slice 6: NL parser (mocked Anthropic; pins prompt + tool schema)
+  test_synth_spec.py            # slice 7: TraceSpec distribution invariants (pure)
+  test_synth_prompts.py         # slice 7: prompt structure + tool schema + extract_file_bytes
+  test_synth_validator.py       # slice 7: adapter-wrapper validator on real format fixtures
+  test_synth_generator.py       # slice 7: retry + cost + rate-limit backoff (mocked Anthropic)
 data/
   raw/
     codex/                 # synthetic rollouts (committed; see data/raw/codex/README.md)
