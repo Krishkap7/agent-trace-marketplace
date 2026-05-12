@@ -179,7 +179,8 @@ def get_trace(conn: sqlite3.Connection, trace_id: str) -> dict[str, Any] | None:
         """
         SELECT id, source_format, raw_blob, atif, ingested_at,
                agent_name, model, num_steps, num_tool_calls,
-               has_error, failure_label, embedding_id
+               has_error, failure_signals, failure_label,
+               failure_label_reasoning, embedding_id
         FROM traces
         WHERE id = ?
         """,

@@ -30,24 +30,33 @@ DEFAULT_DB_PATH = PROJECT_ROOT / "data" / "marketplace.db"
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS traces (
-    id              TEXT PRIMARY KEY,
-    source_format   TEXT NOT NULL,
-    raw_blob        TEXT NOT NULL,
-    atif            TEXT,
-    ingested_at     TEXT NOT NULL,
-    -- Derived from the validated ATIF on insert. ``agent_name`` is the ATIF
-    -- ``agent.name`` field, i.e. the agent SYSTEM identifier ("mcp",
+    id                       TEXT PRIMARY KEY,
+    source_format            TEXT NOT NULL,
+    raw_blob                 TEXT NOT NULL,
+    atif                     TEXT,
+    ingested_at              TEXT NOT NULL,
+    -- Derived from the validated ATIF on insert. ``agent_name`` is the
+    -- ATIF ``agent.name`` field, i.e. the agent SYSTEM identifier ("mcp",
     -- "openhands", "claude-code", ...). It is NOT the per-task agent name
-    -- (e.g. "accountant", "recruiter") which only exists implicitly in the
-    -- source directory layout. Add a ``domain`` column later if needed.
-    agent_name      TEXT,
-    model           TEXT,
-    num_steps       INTEGER,
-    num_tool_calls  INTEGER,
-    -- Reserved for enrichment slices; NULL until then.
-    has_error       INTEGER,
-    failure_label   TEXT,
-    embedding_id    TEXT
+    -- (e.g. "accountant", "recruiter") which only exists implicitly in
+    -- the source directory layout. Add a ``domain`` column later if needed.
+    agent_name               TEXT,
+    model                    TEXT,
+    num_steps                INTEGER,
+    num_tool_calls           INTEGER,
+    -- Slice 2.5: derived from adapter-set ``trajectory.extra["resolved"]``
+    -- when the source format carries ground truth (SWE-agent ``target``).
+    -- Slice 4 fills this for the unlabelled formats from rule-based
+    -- signals; benchmark labels are never overwritten (COALESCE keeps
+    -- them).
+    has_error                INTEGER,
+    -- Slice 4: structural signal JSON (e.g. ``{"loop": true, ...}``)
+    -- plus the LLM-judge label + one-sentence reasoning.
+    failure_signals          TEXT,
+    failure_label            TEXT,
+    failure_label_reasoning  TEXT,
+    -- Reserved for slice 5 (embeddings + semantic search).
+    embedding_id             TEXT
 );
 """
 
@@ -62,9 +71,35 @@ def connect(db_path: Path | str = DEFAULT_DB_PATH) -> sqlite3.Connection:
     return conn
 
 
+def _migrate_add_failure_columns(conn: sqlite3.Connection) -> None:
+    """Idempotently add the slice 4 enrichment columns to an existing DB.
+
+    SQLite's ``ALTER TABLE ADD COLUMN`` is non-idempotent and raises on
+    duplicate columns, so we probe ``PRAGMA table_info`` first. A fresh
+    DB created with the slice 4 ``SCHEMA_SQL`` already has both columns
+    -- this function is a no-op in that case. Existing DBs from slice
+    1-3 only have ``failure_label``; we add ``failure_signals`` and
+    ``failure_label_reasoning`` here without re-creating the table.
+    """
+    cur = conn.execute("PRAGMA table_info(traces)")
+    existing = {row[1] for row in cur.fetchall()}
+    if not existing:
+        # No traces table at all; SCHEMA_SQL above will create it
+        # cleanly. ``init_schema`` calls us after that DDL, so this
+        # branch is just defensive.
+        return
+    if "failure_signals" not in existing:
+        conn.execute("ALTER TABLE traces ADD COLUMN failure_signals TEXT")
+    if "failure_label_reasoning" not in existing:
+        conn.execute("ALTER TABLE traces ADD COLUMN failure_label_reasoning TEXT")
+    conn.commit()
+
+
 def init_schema(conn: sqlite3.Connection) -> None:
-    """Create the ``traces`` table if it doesn't exist."""
+    """Create the ``traces`` table if it doesn't exist, then run any
+    idempotent column-addition migrations against an existing DB."""
     conn.executescript(SCHEMA_SQL)
+    _migrate_add_failure_columns(conn)
     conn.commit()
 
 
@@ -158,6 +193,7 @@ __all__ = [
     "fetch_all_summaries",
     "init_schema",
     "insert_trace",
+    "_migrate_add_failure_columns",
 ]
 
 
