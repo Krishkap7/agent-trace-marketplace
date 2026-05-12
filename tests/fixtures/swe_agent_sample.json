@@ -1,0 +1,80 @@
+{
+  "instance_id": "fictional__test-repo-42",
+  "model_name": "swe-agent-llama-70b",
+  "target": false,
+  "exit_status": "submitted (exit_context)",
+  "generated_patch": "diff --git a/foo.py b/foo.py\n--- a/foo.py\n+++ b/foo.py\n@@ -1 +1 @@\n-x = 1\n+x = 2\n",
+  "eval_logs": "FILLER_LINE\n========================================\nshort eval log content; well under 10KB",
+  "trajectory": [
+    {
+      "role": "system",
+      "system_prompt": "SETTING: You are an autonomous programmer in a sandbox shell. Submit your patch with the `submit` command when done.",
+      "text": "",
+      "mask": false,
+      "cutoff_date": "01.01.2023"
+    },
+    {
+      "role": "user",
+      "system_prompt": "",
+      "text": "We're currently solving the following issue within our repository.\nISSUE: foo() returns the wrong value when called with no args.\nReproduce, then fix it.",
+      "mask": false,
+      "cutoff_date": null
+    },
+    {
+      "role": "ai",
+      "system_prompt": "",
+      "text": "Let me start by exploring the repo structure.\n```\nls -la\n```",
+      "mask": true,
+      "cutoff_date": null
+    },
+    {
+      "role": "user",
+      "system_prompt": "",
+      "text": "foo.py  README.md  tests/\n(Open file: n/a)\n(Current directory: /repo)\nbash-$",
+      "mask": false,
+      "cutoff_date": null
+    },
+    {
+      "role": "ai",
+      "system_prompt": "",
+      "text": "I'll inspect foo.py.\n```\ncat foo.py\n```",
+      "mask": true,
+      "cutoff_date": null
+    },
+    {
+      "role": "user",
+      "system_prompt": "",
+      "text": "x = 1\ndef foo():\n    return x",
+      "mask": false,
+      "cutoff_date": null
+    },
+    {
+      "role": "ai",
+      "system_prompt": "",
+      "text": "The bug is that x is hard-coded to 1; the issue says it should be 2. Patching now.\n```\nsed -i 's/x = 1/x = 2/' foo.py\nsubmit\n```",
+      "mask": true,
+      "cutoff_date": null
+    },
+    {
+      "role": "user",
+      "system_prompt": "",
+      "text": "",
+      "mask": false,
+      "cutoff_date": null
+    },
+    {
+      "role": "ai",
+      "system_prompt": "",
+      "text": "",
+      "mask": true,
+      "cutoff_date": null
+    },
+    {
+      "role": "wat-is-this",
+      "system_prompt": "",
+      "text": "this entry has an unrecognised role and should be skipped",
+      "mask": false,
+      "cutoff_date": null
+    }
+  ]
+}
