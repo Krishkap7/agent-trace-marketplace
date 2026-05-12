@@ -52,6 +52,11 @@ HANDLED_EVENT_TYPES: frozenset[str] = frozenset(
         "file-history-snapshot",
         "last-prompt",
         "queue-operation",
+        # ``ai-title`` is the LLM-generated session title Claude Code attaches
+        # asynchronously after the first user turn. It's session metadata,
+        # not a step. Recognised so the adapter no longer logs WARNINGs and
+        # the count surfaces in trajectory.extra.ai_title_count.
+        "ai-title",
     }
 )
 
@@ -132,6 +137,53 @@ def _build_metrics(usage: dict[str, Any] | None) -> dict[str, Any] | None:
     return metrics or None
 
 
+def _build_final_metrics(events: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Aggregate per-assistant ``message.usage`` into a single FinalMetrics.
+
+    Codex sessions emit standalone ``token_count`` events the adapter rolls
+    up; Claude Code attaches a fresh ``usage`` to every ``assistant`` event
+    instead. Without an aggregation pass, ``Trajectory.final_metrics`` was
+    always ``None`` on real Claude Code sessions even though token counts
+    were available per-step -- breaking parity with the Codex/SWE-agent
+    rows downstream search will need to normalise across.
+
+    Returns ``None`` if no assistant turn carries any usage data.
+    """
+    total_input = 0
+    total_output = 0
+    total_cache_read = 0
+    total_cache_create = 0
+    seen = False
+    for event in events:
+        if event.get("type") != "assistant":
+            continue
+        msg = event.get("message")
+        if not isinstance(msg, dict):
+            continue
+        usage = msg.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        seen = True
+        if isinstance(v := usage.get("input_tokens"), int):
+            total_input += v
+        if isinstance(v := usage.get("output_tokens"), int):
+            total_output += v
+        if isinstance(v := usage.get("cache_read_input_tokens"), int):
+            total_cache_read += v
+        if isinstance(v := usage.get("cache_creation_input_tokens"), int):
+            total_cache_create += v
+    if not seen:
+        return None
+    fm: dict[str, Any] = {
+        "total_prompt_tokens": total_input,
+        "total_completion_tokens": total_output,
+        "total_cached_tokens": total_cache_read,
+    }
+    if total_cache_create:
+        fm["extra"] = {"cache_creation_input_tokens": total_cache_create}
+    return fm
+
+
 def _walk_assistant_content(
     blocks: list[Any],
 ) -> tuple[str, str | None, list[dict[str, Any]]]:
@@ -157,9 +209,27 @@ def _walk_assistant_content(
             if isinstance(text, str) and text:
                 texts.append(text)
         elif btype == "thinking":
+            # Real Claude Code with extended-thinking emits two distinct
+            # shapes for the same conceptual event:
+            #   1. Plain text:        {"type":"thinking", "thinking":"the model's words"}
+            #   2. Encrypted-only:    {"type":"thinking", "thinking":"", "signature":"<~250B base64>"}
+            # Same situation as Codex's encrypted_content: the reasoning
+            # happened but Anthropic withholds the human-readable trace
+            # via the signature. A previous version of this branch only
+            # accepted shape #1 and silently dropped #2, making
+            # extended-thinking sessions look like the model never
+            # reasoned at all. Now we emit a placeholder for shape #2
+            # so the silver column reflects what actually happened;
+            # the opaque signature stays in raw_blob for forensics.
             thought = block.get("thinking") or block.get("text")
             if isinstance(thought, str) and thought:
                 thinking_parts.append(thought)
+                continue
+            signature = block.get("signature")
+            if isinstance(signature, str) and signature:
+                thinking_parts.append(
+                    f"[encrypted thinking, signature {len(signature)} bytes]"
+                )
         elif btype == "tool_use":
             tool_id = block.get("id")
             name = block.get("name")
@@ -260,6 +330,11 @@ def _build_trajectory_extra(
         extra["last_prompt_count"] = drop_counts["last-prompt"]
     if drop_counts.get("queue-operation"):
         extra["queue_operation_count"] = drop_counts["queue-operation"]
+    if drop_counts.get("ai-title"):
+        extra["ai_title_count"] = drop_counts["ai-title"]
+    ai_title = _extract_first(events, ("aiTitle",))
+    if isinstance(ai_title, str) and ai_title:
+        extra["ai_title"] = ai_title
 
     if attachment_counts:
         extra["attachment_counts"] = dict(attachment_counts)
@@ -377,6 +452,9 @@ class ClaudeCodeAdapter(BaseAdapter):
             "agent": agent_dict,
             "steps": steps_data,
         }
+        final_metrics = _build_final_metrics(events)
+        if final_metrics is not None:
+            traj_dict["final_metrics"] = final_metrics
         if traj_extra:
             traj_dict["extra"] = traj_extra
 

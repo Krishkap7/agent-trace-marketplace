@@ -87,28 +87,123 @@ CURSOR_ROLE_TO_SOURCE: dict[str, str] = {
 }
 
 
-def _extract_message_text(content: Any) -> str:
-    """Coerce a Cursor message ``content`` field into plain text.
+def _walk_message_content(content: Any) -> tuple[str, str | None]:
+    """Split Cursor message ``content`` into ``(text, reasoning)``.
 
     Cursor exports occasionally adopt the Anthropic content-blocks shape
-    (``[{"type": "text", "text": "..."}]``). We accept both string and
-    list-of-blocks. Non-text blocks (image refs etc.) are silently
-    dropped -- they aren't useful for failure-mode search.
+    (``[{"type": "text", "text": "..."}, {"type": "thinking", ...}]``)
+    -- most directly when ``cursor-agent --output-format stream-json`` is
+    piped into a v1 envelope. We accept both string content and a
+    list-of-blocks; non-text/-thinking blocks (image refs, etc.) are
+    silently dropped because they're not useful for failure-mode search.
+
+    Returns the concatenated visible text plus, if any thinking blocks
+    were present, a single ``reasoning`` string the caller attaches as
+    ``Step.reasoning_content``.
+
+    Thinking blocks come in two real-world shapes the adapter must
+    handle, both mirrored from the Codex / Claude Code bugs:
+
+    1. Plain text: ``{"type":"thinking", "thinking":"..."}``
+    2. Encrypted-only: ``{"type":"thinking", "thinking":"",
+       "signature":"<~250B base64>"}`` -- Anthropic withholds the
+       human-readable trace and only ships an opaque cryptographic
+       signature. Previously these were silently dropped on the
+       Codex/Claude adapters (and never extracted at all here),
+       making extended-thinking sessions look like the model never
+       reasoned. Now we surface a placeholder so the silver column
+       reflects what happened; the opaque signature stays in
+       ``raw_blob`` for forensics.
     """
     if isinstance(content, str):
-        return content
+        return content, None
     if not isinstance(content, list):
-        return ""
-    parts: list[str] = []
+        return "", None
+
+    texts: list[str] = []
+    thinking_parts: list[str] = []
     for block in content:
-        if isinstance(block, dict):
-            text = block.get("text")
-            if isinstance(text, str) and text:
-                parts.append(text)
-            elif block.get("type") in (None, "text"):
-                # Some exporters put text directly under different keys.
-                pass
-    return "\n".join(parts)
+        if not isinstance(block, dict):
+            continue
+        btype = block.get("type")
+        if btype == "thinking":
+            thought = block.get("thinking") or block.get("text")
+            if isinstance(thought, str) and thought:
+                thinking_parts.append(thought)
+                continue
+            signature = block.get("signature")
+            if isinstance(signature, str) and signature:
+                thinking_parts.append(
+                    f"[encrypted thinking, signature {len(signature)} bytes]"
+                )
+            continue
+        # Text-like block: accept any block with a ``text`` field
+        # (covers ``type=text`` plus the small handful of exporters
+        # that elide the type when only one shape is possible).
+        text = block.get("text")
+        if isinstance(text, str) and text:
+            texts.append(text)
+    return (
+        "\n".join(texts),
+        "\n".join(thinking_parts) if thinking_parts else None,
+    )
+
+
+def _extract_message_text(content: Any) -> str:
+    """Back-compat shim: visible-text-only view of message content.
+
+    Existing call sites that don't care about reasoning continue to
+    work; new code should prefer :func:`_walk_message_content` so the
+    reasoning component is preserved.
+    """
+    text, _ = _walk_message_content(content)
+    return text
+
+
+def _build_final_metrics(messages: list[Any]) -> dict[str, Any] | None:
+    """Aggregate Anthropic-style ``usage`` blocks into a single FinalMetrics.
+
+    Cursor's v1 envelope doesn't require ``usage`` on each message, but
+    any export that flows through ``cursor-agent --output-format
+    stream-json`` carries it (the same Anthropic shape Claude Code
+    uses). Without this rollup, ``Trajectory.final_metrics`` would
+    always be ``None`` for Cursor rows -- breaking parity with Codex
+    and Claude Code rows downstream search will need to normalise
+    across. Direct mirror of the Claude Code fix.
+
+    Returns ``None`` when no message carries usage data so we don't
+    fabricate an empty metrics block.
+    """
+    total_input = 0
+    total_output = 0
+    total_cache_read = 0
+    total_cache_create = 0
+    seen = False
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        usage = msg.get("usage")
+        if not isinstance(usage, dict):
+            continue
+        seen = True
+        if isinstance(v := usage.get("input_tokens"), int):
+            total_input += v
+        if isinstance(v := usage.get("output_tokens"), int):
+            total_output += v
+        if isinstance(v := usage.get("cache_read_input_tokens"), int):
+            total_cache_read += v
+        if isinstance(v := usage.get("cache_creation_input_tokens"), int):
+            total_cache_create += v
+    if not seen:
+        return None
+    fm: dict[str, Any] = {
+        "total_prompt_tokens": total_input,
+        "total_completion_tokens": total_output,
+        "total_cached_tokens": total_cache_read,
+    }
+    if total_cache_create:
+        fm["extra"] = {"cache_creation_input_tokens": total_cache_create}
+    return fm
 
 
 def _build_tool_call_dict(raw: dict[str, Any]) -> dict[str, Any] | None:
@@ -239,7 +334,7 @@ class CursorAdapter(BaseAdapter):
                 unknown_roles[key] = unknown_roles.get(key, 0) + 1
                 continue
 
-            text = _extract_message_text(msg.get("content"))
+            text, reasoning = _walk_message_content(msg.get("content"))
             tool_calls_raw = msg.get("tool_calls")
             tool_calls: list[dict[str, Any]] = []
             if isinstance(tool_calls_raw, list):
@@ -280,9 +375,12 @@ class CursorAdapter(BaseAdapter):
                     )
 
             # If this is a pure tool_results carrier (no text, no own
-            # tool_calls), it's not a Step on its own -- skip after
-            # attaching results above.
-            if not text.strip() and not tool_calls:
+            # tool_calls, no reasoning), it's not a Step on its own --
+            # skip after attaching results above. A message whose only
+            # content is a thinking block IS a real step (we want the
+            # reasoning placeholder preserved on agent steps).
+            has_reasoning = source == "agent" and bool(reasoning)
+            if not text.strip() and not tool_calls and not has_reasoning:
                 continue
 
             step: dict[str, Any] = {
@@ -299,6 +397,10 @@ class CursorAdapter(BaseAdapter):
                 model = envelope.get("model")
                 if isinstance(model, str) and model:
                     step["model_name"] = model
+                # Reasoning only goes on agent steps; ATIF user/system
+                # steps don't carry it. Mirrors Codex / Claude Code.
+                if reasoning:
+                    step["reasoning_content"] = reasoning
             steps_data.append(step)
             step_idx = len(steps_data) - 1
             for tc in tool_calls:
@@ -351,6 +453,9 @@ class CursorAdapter(BaseAdapter):
             "agent": agent_dict,
             "steps": steps_data,
         }
+        final_metrics = _build_final_metrics(messages)
+        if final_metrics is not None:
+            traj_dict["final_metrics"] = final_metrics
         if traj_extra:
             traj_dict["extra"] = traj_extra
 

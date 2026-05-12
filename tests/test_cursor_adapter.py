@@ -313,3 +313,206 @@ def test_string_content_field_handled(adapter: CursorAdapter) -> None:
     assert traj is not None
     assert traj.steps[0].message == "hello"
     assert traj.steps[1].message == "hi"
+
+
+# --------------------------------------------------------------------------- #
+# Cross-format sweep: Codex / Claude Code real-data bugs ported to Cursor
+# --------------------------------------------------------------------------- #
+#
+# The Codex and Claude Code adapters had three real-data bugs (PRs #4, #5):
+#   1. encrypted reasoning/thinking blocks silently dropped
+#   2. ``final_metrics`` never aggregated from per-event usage data
+#   3. unknown event/role types not catalogued in trajectory.extra
+#
+# Cursor inherited the first two and is the worst offender on #1 -- it
+# never extracted reasoning at all. #3 was already covered by the
+# existing ``unknown_roles`` counter. These tests pin the fixes.
+
+
+def test_thinking_block_with_plain_text_lands_in_reasoning_content(
+    adapter: CursorAdapter,
+) -> None:
+    """An Anthropic-style thinking block carrying real text MUST land
+    on the agent step's ``reasoning_content`` rather than be silently
+    dropped. Most Cursor flows that emit thinking blocks come from
+    ``cursor-agent --output-format stream-json`` piped into a v1
+    envelope, so the wire shape is Anthropic's."""
+    payload = json.dumps(
+        {
+            "session_id": "thinking-plain-text",
+            "model": "claude-3.5-sonnet",
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "Let me plan first."},
+                        {"type": "text", "text": "Okay, here goes."},
+                    ],
+                },
+            ],
+        }
+    )
+    traj = adapter.to_atif(payload)
+    assert traj is not None
+    agent_steps = [s for s in traj.steps if s.source == "agent"]
+    assert len(agent_steps) == 1
+    assert agent_steps[0].message == "Okay, here goes."
+    rc = agent_steps[0].reasoning_content or ""
+    assert "let me plan first" in rc.lower(), (
+        "thinking text must land on reasoning_content (was previously dropped)"
+    )
+
+
+def test_thinking_block_encrypted_signature_surfaces_as_placeholder(
+    adapter: CursorAdapter,
+) -> None:
+    """Anthropic's extended-thinking shape with the human-readable
+    trace withheld: ``{"type":"thinking", "thinking":"", "signature":"<base64>"}``.
+    Direct mirror of the Codex ``encrypted_content`` and Claude Code
+    ``thinking.signature`` placeholder fixes -- the silver column has
+    to record "reasoning happened here" or the trajectory looks like
+    the model never reasoned."""
+    payload = json.dumps(
+        {
+            "session_id": "thinking-encrypted",
+            "model": "claude-3.5-sonnet",
+            "messages": [
+                {"role": "user", "content": "hi"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "", "signature": "x" * 250},
+                        {"type": "text", "text": "Done."},
+                    ],
+                },
+            ],
+        }
+    )
+    traj = adapter.to_atif(payload)
+    assert traj is not None
+    agent_steps = [s for s in traj.steps if s.source == "agent"]
+    assert len(agent_steps) == 1
+    rc = agent_steps[0].reasoning_content or ""
+    assert "encrypted thinking" in rc.lower()
+    assert "250" in rc
+
+
+def test_thinking_only_assistant_message_still_emits_a_step(
+    adapter: CursorAdapter,
+) -> None:
+    """An assistant message whose entire content is a thinking block
+    (no visible text, no tool_calls) is unusual but valid. Previously
+    the empty-text-and-no-tool-calls skip dropped it entirely -- losing
+    the reasoning placeholder along with the step. Must now emit a
+    step carrying just the reasoning."""
+    payload = json.dumps(
+        {
+            "session_id": "thinking-only",
+            "model": "claude-3.5-sonnet",
+            "messages": [
+                {"role": "user", "content": "ok"},
+                {
+                    "role": "assistant",
+                    "content": [
+                        {"type": "thinking", "thinking": "", "signature": "x" * 100},
+                    ],
+                },
+            ],
+        }
+    )
+    traj = adapter.to_atif(payload)
+    assert traj is not None
+    agent_steps = [s for s in traj.steps if s.source == "agent"]
+    assert len(agent_steps) == 1
+    assert agent_steps[0].reasoning_content
+    assert "encrypted thinking" in agent_steps[0].reasoning_content.lower()
+
+
+def test_reasoning_not_attached_to_user_or_system_steps(
+    adapter: CursorAdapter,
+) -> None:
+    """ATIF user/system steps don't carry reasoning. If a user message
+    somehow contains a thinking block (malformed export), we strip the
+    reasoning rather than attach it to a user-source step."""
+    payload = json.dumps(
+        {
+            "session_id": "thinking-user",
+            "model": "claude-3.5-sonnet",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "thinking", "thinking": "user thinking? no."},
+                        {"type": "text", "text": "actual user text"},
+                    ],
+                },
+                {"role": "assistant", "content": "ack"},
+            ],
+        }
+    )
+    traj = adapter.to_atif(payload)
+    assert traj is not None
+    user_steps = [s for s in traj.steps if s.source == "user"]
+    assert len(user_steps) == 1
+    assert user_steps[0].message == "actual user text"
+    assert user_steps[0].reasoning_content is None
+
+
+def test_final_metrics_aggregated_when_messages_carry_usage(
+    adapter: CursorAdapter,
+) -> None:
+    """If a Cursor envelope's messages carry Anthropic-style ``usage``
+    blocks (the shape ``cursor-agent --output-format stream-json``
+    emits), the adapter must roll them up into trajectory-level
+    ``final_metrics``. Otherwise Cursor rows are the only format whose
+    final_metrics is always None, breaking downstream comparison."""
+    payload = json.dumps(
+        {
+            "session_id": "cursor-with-usage",
+            "model": "claude-3.5-sonnet",
+            "messages": [
+                {"role": "user", "content": "do thing"},
+                {
+                    "role": "assistant",
+                    "content": "doing thing",
+                    "usage": {
+                        "input_tokens": 100,
+                        "output_tokens": 200,
+                        "cache_read_input_tokens": 50,
+                        "cache_creation_input_tokens": 25,
+                    },
+                },
+                {"role": "user", "content": "more"},
+                {
+                    "role": "assistant",
+                    "content": "more done",
+                    "usage": {
+                        "input_tokens": 10,
+                        "output_tokens": 20,
+                        "cache_read_input_tokens": 5,
+                    },
+                },
+            ],
+        }
+    )
+    traj = adapter.to_atif(payload)
+    assert traj is not None
+    fm = traj.final_metrics
+    assert fm is not None
+    assert fm.total_prompt_tokens == 110
+    assert fm.total_completion_tokens == 220
+    assert fm.total_cached_tokens == 55
+    extra = fm.extra or {}
+    assert extra.get("cache_creation_input_tokens") == 25
+
+
+def test_final_metrics_none_when_no_message_carries_usage(
+    adapter: CursorAdapter,
+) -> None:
+    """Don't fabricate an empty final_metrics block when the envelope
+    has no usage data -- keeping the field None signals "no token data
+    available" honestly. Mirrors the Claude Code regression."""
+    traj = adapter.to_atif(_envelope())
+    assert traj is not None
+    assert traj.final_metrics is None
