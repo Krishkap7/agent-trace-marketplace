@@ -112,9 +112,7 @@ def render(conn: sqlite3.Connection, trace_id: str) -> None:
         # actors so there's no ambiguity.
         st.subheader("Agent trajectory")
         agent_blob = atif.get("agent") or {}
-        agent_name = (
-            row.get("agent_name") or agent_blob.get("name") or "this agent"
-        )
+        agent_name = row.get("agent_name") or agent_blob.get("name") or "this agent"
         agent_model = row.get("model") or agent_blob.get("model_name") or "?"
         st.markdown(
             f"Step-by-step record of what the **{agent_name}** agent "

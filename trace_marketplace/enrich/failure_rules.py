@@ -15,8 +15,12 @@ strict / too loose against SWE-agent ground truth.
 from __future__ import annotations
 
 import json
+import logging
 import re
+import sqlite3
 from typing import Any
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Tunable thresholds.
@@ -409,12 +413,82 @@ def any_signal_fired(signals: dict[str, bool]) -> bool:
     return any(bool(v) for v in signals.values())
 
 
+# ---------------------------------------------------------------------------
+# Persistence helper.
+# ---------------------------------------------------------------------------
+
+
+def persist_signals_for_trace(
+    conn: sqlite3.Connection, trace_id: str, atif_text: str | None
+) -> dict[str, bool] | None:
+    """Compute structural signals for one trace and write them to the DB.
+
+    Shared by :mod:`scripts.detect_failures` (batch pass over every
+    unannotated row) and :mod:`trace_marketplace.ui.upload_view` (inline
+    pass after a fresh upload). Centralising the SQL + JSON-encode + has_error
+    rules in one place stops the two callers from drifting; the older
+    pre-extraction version had the same UPDATE statement copy-pasted into
+    ``detect_failures._process_one`` and was a foot-gun for the upload path.
+
+    Behaviour:
+
+    * ``atif_text is None`` or fails to ``json.loads`` -> log + return
+      ``None``. Caller decides whether that's fatal (it isn't, for the
+      batch pass; it's a no-op for upload since unknown-format rows
+      already have ``atif`` NULL by design).
+    * Decoded payload isn't a dict -> same as above.
+    * Otherwise: compute signals, persist them as a sorted JSON blob,
+      and fill ``has_error`` from ``any_signal_fired`` ONLY when the
+      column was previously NULL (``COALESCE``). Benchmark ground-truth
+      ``has_error`` values (e.g. SWE-agent's ``target``-derived 0/1)
+      are preserved exactly because they're written by the ingest
+      pipeline *before* this helper runs.
+
+    Does NOT call ``conn.commit()``. Callers control transaction scope
+    so multi-file uploads can batch commits and the batch script's
+    per-row commit-cadence stays explicit.
+    """
+    if atif_text is None:
+        log.debug(
+            "persist_signals_for_trace: trace %s has NULL atif; skipping", trace_id
+        )
+        return None
+    try:
+        traj = json.loads(atif_text)
+    except json.JSONDecodeError:
+        log.warning(
+            "persist_signals_for_trace: trace %s has malformed ATIF JSON; skipping",
+            trace_id,
+        )
+        return None
+    if not isinstance(traj, dict):
+        log.warning(
+            "persist_signals_for_trace: trace %s ATIF decoded to non-dict; skipping",
+            trace_id,
+        )
+        return None
+
+    signals = compute_signals(traj)
+    fired_int = int(any_signal_fired(signals))
+    conn.execute(
+        """
+        UPDATE traces
+           SET failure_signals = ?,
+               has_error = COALESCE(has_error, ?)
+         WHERE id = ?
+        """,
+        (json.dumps(signals, sort_keys=True), fired_int, trace_id),
+    )
+    return signals
+
+
 __all__ = [
     "ENDED_ON_ERROR_WINDOW",
     "LOOP_REPEAT_THRESHOLD",
     "MAX_TURNS_THRESHOLD",
     "any_signal_fired",
     "compute_signals",
+    "persist_signals_for_trace",
     "signal_abandonment",
     "signal_ended_on_error",
     "signal_hit_max_turns",

@@ -4,7 +4,9 @@ A failure-mode search engine for coding-agent traces. See [trace-marketplace-con
 
 ## Status
 
-**Slice 4 (current):** Failure-detection enrichment. Deterministic rule pass (`scripts/detect_failures.py`) populates a new `failure_signals` JSON column and fills `has_error` for unlabelled traces; `scripts/validate_detection.py` benchmarks the rules against SWE-agent ground truth (precision ~0.78, recall ~0.48 aggregate, full table in [data/validation_report.md](data/validation_report.md)). LLM judge (`scripts/judge_failures.py`, Sonnet 4.6) classifies each flagged + sampled trace into an 11-way `FailureLabel` enum plus a one-sentence justification. Both passes are idempotent.
+**Slice 5 (current):** Browser uploads. The Streamlit UI gained an upload page (`?page=upload`) that drag-drops or pastes a trace through the existing `ingest_file()` pipeline + the rule-based failure pass, so a freshly uploaded trace lands in the list view with `has_error` and `failure_signals` populated within a single page render. LLM-judge stays a batch job, deliberately -- per-upload Sonnet calls would be slow and unbounded; fresh uploads pick up a `failure_label` on the next `scripts/judge_failures.py` run via the existing `WHERE failure_label IS NULL` gate. Per-file isolation means one bad payload in a multi-file submission can't tank the rest.
+
+**Slice 4:** Failure-detection enrichment. Deterministic rule pass (`scripts/detect_failures.py`) populates a new `failure_signals` JSON column and fills `has_error` for unlabelled traces; `scripts/validate_detection.py` benchmarks the rules against SWE-agent ground truth (precision ~0.78, recall ~0.48 aggregate, full table in [data/validation_report.md](data/validation_report.md)). LLM judge (`scripts/judge_failures.py`, Sonnet 4.6) classifies each flagged + sampled trace into an 11-way `FailureLabel` enum plus a rich shop-window paragraph of reasoning. Both passes are idempotent.
 
 **Slice 3:** Streamlit UI viewer. Filterable, paginated list view + URL-linkable detail view that renders the ATIF as a readable conversation thread (italic reasoning, encrypted-reasoning badge, collapsible tool calls / observations). Falls back to raw blob for `atif IS NULL` traces. SQL helpers live in `trace_marketplace/ui/queries.py` and are unit-tested without Streamlit.
 
@@ -104,6 +106,21 @@ Click any row to navigate to `?trace_id=<id>` — the URL is bookmarkable. The d
 
 > Screenshots regenerated after each UI change — drop replacements into `docs/screenshots/`.
 
+## Upload from the UI (slice 5)
+
+Click the **Upload trace ->** link in the top-right of the list view (or navigate directly to `?page=upload`). The page accepts two flows:
+
+* **Drag-drop** -- multi-file. Each file is staged into its own tempdir, fed through `ingest_file()`, then the rule-based failure pass runs inline so the result block can report which signals fired. Per-file try/except means one bad upload doesn't abort the rest.
+* **Paste** -- single-shot textarea for ad-hoc demos. Same pipeline, same idempotency guarantees.
+
+Format detection is content-based, so the file extension doesn't have to match the format (a Claude Code session saved as `.txt` still works). Unknown formats land as raw blobs -- they remain searchable via the list-view text search, they just lack structured filters until an adapter for that shape is added.
+
+`failure_label` (the Sonnet 4.6 taxonomy classification) is **deliberately not** populated on upload -- the synchronous LLM call would add 5-30 s of user-facing latency and uncapped cost. Fresh uploads land with `failure_label = NULL`; the next `scripts/judge_failures.py` run picks them up via its existing gate.
+
+![Upload page](docs/screenshots/upload_view.png)
+
+> Drop a replacement screenshot into `docs/screenshots/upload_view.png` after each UI change.
+
 ## Tests
 
 ```bash
@@ -136,11 +153,12 @@ trace_marketplace/
     failure_judge.py       # Anthropic SDK wrapper; tool-use structured output
   ui/
     __init__.py
-    app.py                 # 30-line router; reads st.query_params["trace_id"]
+    app.py                 # 3-route router (page=upload / trace_id / list)
     queries.py             # parameterised SQL helpers; no Streamlit import
     components.py          # render_step / render_header / render_filters_summary
     list_view.py           # sidebar filters + st.dataframe + manual pagination
     detail_view.py         # header + conversation thread + raw-blob fallback
+    upload_view.py         # slice 5: drag-drop + paste -> ingest_file -> inline rule pass
 scripts/
   download_corpus.py            # ATIF MCP traces → data/raw/<agent>/
   download_swe_agent.py         # nebius/SWE-agent-trajectories parquet → data/raw/swe_agent/
@@ -170,6 +188,7 @@ tests/
   test_detect.py
   test_pipeline_has_error.py
   test_swe_agent_adapter.py
+  test_upload_integration.py    # slice 5: ingest + rule pass on a Claude Code JSONL fixture
 data/
   raw/
     codex/                 # synthetic rollouts (committed; see data/raw/codex/README.md)

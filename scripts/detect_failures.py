@@ -17,14 +17,16 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import sqlite3
 import sys
 from collections import Counter
 from pathlib import Path
 
-from trace_marketplace.enrich.failure_rules import any_signal_fired, compute_signals
+from trace_marketplace.enrich.failure_rules import (
+    any_signal_fired,
+    persist_signals_for_trace,
+)
 from trace_marketplace.storage.db import DEFAULT_DB_PATH, connect, init_schema
 
 log = logging.getLogger("detect_failures")
@@ -72,32 +74,13 @@ def _process_one(
 ) -> dict[str, bool] | None:
     """Compute signals for one trace; persist them.
 
-    Returns the signals dict on success, ``None`` if the ATIF blob
-    failed to parse. JSON-decode errors are logged but never raised --
-    one bad row shouldn't tank the whole pass.
+    Thin wrapper over :func:`persist_signals_for_trace` -- kept as a
+    module-local function so the per-row commit cadence + counter
+    bookkeeping in :func:`main` reads cleanly. The shared helper lives
+    in :mod:`trace_marketplace.enrich.failure_rules` so the upload view
+    (slice 5) and this batch script can't drift on the UPDATE SQL.
     """
-    try:
-        traj = json.loads(atif_blob)
-    except json.JSONDecodeError:
-        log.warning("Trace %s has malformed ATIF JSON; skipping", trace_id)
-        return None
-    if not isinstance(traj, dict):
-        log.warning("Trace %s ATIF decoded to non-dict; skipping", trace_id)
-        return None
-
-    signals = compute_signals(traj)
-    fired_int = int(any_signal_fired(signals))
-
-    conn.execute(
-        """
-        UPDATE traces
-           SET failure_signals = ?,
-               has_error = COALESCE(has_error, ?)
-         WHERE id = ?
-        """,
-        (json.dumps(signals, sort_keys=True), fired_int, trace_id),
-    )
-    return signals
+    return persist_signals_for_trace(conn, trace_id, atif_blob)
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -178,12 +178,26 @@ def _sidebar_filters(conn: sqlite3.Connection) -> ListFilters:
 
 def render(conn: sqlite3.Connection) -> None:
     """Render the list view. ``app.py`` calls this when no
-    ``?trace_id=`` query param is present."""
-    st.title("Trace marketplace")
-    st.caption(
-        "Browse ingested coding-agent traces. Use the sidebar to filter; "
-        "click **Open ->** on any row to see the full trace."
-    )
+    ``?trace_id=`` or ``?page=...`` query param is present."""
+    header_col, cta_col = st.columns([5, 1])
+    with header_col:
+        st.title("Trace marketplace")
+        st.caption(
+            "Browse ingested coding-agent traces. Use the sidebar to "
+            "filter; click **Open ->** on any row to see the full trace."
+        )
+    with cta_col:
+        # Plain anchor instead of ``st.button`` + ``st.query_params``
+        # write: the link is bookmarkable, opens in a new tab on
+        # middle-click, and is one fewer Streamlit rerun on the
+        # happy path. The CTA lives in a right-aligned column so it
+        # reads as a primary action without crowding the title.
+        st.markdown(
+            "<div style='text-align: right; padding-top: 1rem;'>"
+            "<a href='?page=upload' style='font-size: 1rem;'>"
+            "Upload trace -></a></div>",
+            unsafe_allow_html=True,
+        )
 
     filters = _sidebar_filters(conn)
 
