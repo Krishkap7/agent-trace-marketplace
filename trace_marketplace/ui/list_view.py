@@ -43,6 +43,31 @@ def _has_atif_label(value: str) -> bool | None:
     return {"All": None, "Has ATIF": True, "Raw blob only": False}[value]
 
 
+def _slider_to_step_bounds(
+    selected: tuple[int, int], slider_bounds: tuple[int, int]
+) -> tuple[int | None, int | None]:
+    """Translate the ``num_steps`` slider value into ``ListFilters``
+    ``min_steps`` / ``max_steps`` arguments.
+
+    When the slider sits at its widest position we return ``(None, None)``
+    so the WHERE clause is skipped entirely. SQL's ``NULL >= ?`` evaluates
+    to ``NULL`` (falsy), so passing through the integer bounds would
+    permanently hide every row with ``num_steps IS NULL`` -- which is
+    every unknown-format / adapter-failure row in the corpus -- and the
+    user wouldn't have a way to recover them from the slider alone.
+    (Caught by Cursor bugbot on commit 655c824.)
+
+    When the slider has been narrowed in either direction we pass the
+    integers through; rows with ``NULL`` step counts can't satisfy a
+    numeric range and getting filtered out matches the standard semantic.
+    """
+    sel_lo, sel_hi = selected
+    bound_lo, bound_hi = slider_bounds
+    if sel_lo <= bound_lo and sel_hi >= bound_hi:
+        return None, None
+    return sel_lo, sel_hi
+
+
 def _sidebar_filters(conn: sqlite3.Connection) -> ListFilters:
     """Render the sidebar controls and return the user's selections.
 
@@ -113,6 +138,14 @@ def _sidebar_filters(conn: sqlite3.Connection) -> ListFilters:
         min_value=int(lo),
         max_value=int(hi),
         value=(int(lo), int(hi)),
+        help=(
+            "Leave at the full range to also include traces whose "
+            "num_steps is NULL (unknown-format / raw-blob rows)."
+        ),
+    )
+    min_steps, max_steps = _slider_to_step_bounds(
+        (int(selected_lo), int(selected_hi)),
+        (int(lo), int(hi)),
     )
 
     search = st.sidebar.text_input(
@@ -128,8 +161,8 @@ def _sidebar_filters(conn: sqlite3.Connection) -> ListFilters:
         failure_labels=failure_labels,
         has_error=has_error_choice,
         has_atif=_has_atif_label(has_atif_choice),
-        min_steps=int(selected_lo),
-        max_steps=int(selected_hi),
+        min_steps=min_steps,
+        max_steps=max_steps,
         search=search.strip(),
     )
 

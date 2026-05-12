@@ -234,6 +234,48 @@ def test_has_error_options_and_values_stay_in_sync() -> None:
     assert set(HAS_ERROR_OPTIONS) == HAS_ERROR_VALUES
 
 
+# ---------- num_steps slider NULL-handling ----------
+
+
+def test_list_traces_includes_null_num_steps_rows_when_no_step_filter(
+    populated_db: sqlite3.Connection,
+) -> None:
+    # The synthetic __test_unknown__ row has ``num_steps IS NULL``. The
+    # list view must surface it when the user has not narrowed the
+    # num_steps slider, otherwise unknown-format / adapter-failure
+    # rows are invisible from the table.
+    _, total = list_traces(populated_db)
+    rows, _ = list_traces(populated_db, limit=999)
+    assert total == 6
+    assert any(r["id"] == "__test_unknown__" for r in rows)
+
+
+def test_slider_to_step_bounds_full_range_returns_none() -> None:
+    # Imported lazily because list_view itself imports streamlit; we
+    # want the test to fail loudly if the helper signature drifts.
+    from trace_marketplace.ui.list_view import _slider_to_step_bounds
+
+    assert _slider_to_step_bounds((0, 100), (0, 100)) == (None, None)
+
+
+def test_slider_to_step_bounds_narrowed_returns_ints() -> None:
+    from trace_marketplace.ui.list_view import _slider_to_step_bounds
+
+    assert _slider_to_step_bounds((5, 50), (0, 100)) == (5, 50)
+
+
+def test_slider_to_step_bounds_only_lo_narrowed() -> None:
+    from trace_marketplace.ui.list_view import _slider_to_step_bounds
+
+    assert _slider_to_step_bounds((5, 100), (0, 100)) == (5, 100)
+
+
+def test_slider_to_step_bounds_only_hi_narrowed() -> None:
+    from trace_marketplace.ui.list_view import _slider_to_step_bounds
+
+    assert _slider_to_step_bounds((0, 50), (0, 100)) == (0, 50)
+
+
 # ---------- trace_counts / bounds ----------
 
 
