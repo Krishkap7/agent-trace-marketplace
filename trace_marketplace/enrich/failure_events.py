@@ -34,8 +34,10 @@ Public API:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import sqlite3
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -753,6 +755,127 @@ def require_api_key() -> None:
         )
 
 
+def persist_events_for_trace(
+    conn: sqlite3.Connection,
+    trace_id: str,
+    *,
+    client: _AnthropicLike | None = None,
+) -> EventsResult | None:
+    """Run the Opus 4.7 events extractor on one trace and persist.
+
+    Mirrors :func:`trace_marketplace.enrich.failure_judge.persist_judge_for_trace`
+    in shape: the upload flow chains rule pass -> embedding -> judge ->
+    events -> recommendations as a clean linear sequence. Writes
+    ``failure_events`` (JSON list), ``failure_label`` (overwriting any
+    Sonnet-judge value with the events-derived summary -- matches the
+    batch script's behaviour), ``failure_label_source =
+    'opus_events_derived'``, and ``ultimately_succeeded``. Also flips
+    ``has_error`` to ``1`` when the events list contains any
+    unrecovered failures (a defensive write-back so the recoveries
+    panel gate stays consistent with what Opus actually saw, even
+    when the rule pass missed the failure).
+
+    Does NOT commit; the upload caller batches the commit with the
+    other writes (signals, embedding, judge, recommendations) so the
+    whole row lands as one transaction.
+
+    Graceful no-ops (returns ``None``, never raises -- the upload
+    pipeline depends on every helper having a no-raise contract so
+    one failed pass can't tank the rest of the row):
+
+    * trace_id missing from the ``traces`` table
+    * ``atif IS NULL`` (raw-blob row, adapter failure -- nothing
+      semantic to extract)
+    * ``ANTHROPIC_API_KEY`` env var unset (Streamlit Cloud demo
+      without secrets configured -> we just skip)
+    * ATIF JSON parse failure
+    * Extractor call failure (``EventsExtractionError``, network
+      error, anything else) -- logged, swallowed; the upload still
+      succeeds with ``failure_events = NULL``
+
+    Returns the :class:`EventsResult` on success so the caller can
+    surface the event count in the upload result UI without a second
+    DB read.
+    """
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        log.info(
+            "persist_events_for_trace: ANTHROPIC_API_KEY missing; "
+            "skipping events extraction for trace %s",
+            trace_id,
+        )
+        return None
+
+    row = conn.execute(
+        "SELECT atif, ultimately_succeeded FROM traces WHERE id = ?",
+        (trace_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    atif_text = row["atif"] if "atif" in row.keys() else row[0]
+    if not atif_text:
+        return None
+    existing_succeeded = (
+        row["ultimately_succeeded"] if "ultimately_succeeded" in row.keys() else row[1]
+    )
+
+    try:
+        atif = json.loads(atif_text)
+    except json.JSONDecodeError:
+        log.warning(
+            "persist_events_for_trace: failed to parse ATIF for trace %s; skipping",
+            trace_id,
+        )
+        return None
+    if not isinstance(atif, dict):
+        return None
+
+    try:
+        result = extract_events(atif, client=client)
+    except Exception:  # noqa: BLE001 -- extraction errors / network / SDK
+        log.exception(
+            "persist_events_for_trace: events extraction failed for trace "
+            "%s; leaving failure_events NULL (next batch run will pick "
+            "it up)",
+            trace_id,
+        )
+        return None
+
+    summary_label = summarize_label(result.events).value
+    new_succeeded = derive_ultimately_succeeded(result.events, existing_succeeded)
+    payload = json.dumps([e.to_dict() for e in result.events])
+    # Writes: events JSON, summary label (overwrites any Sonnet value),
+    # provenance, outcome flag. ``has_error`` gets a defensive bump to
+    # 1 if Opus saw any unrecovered failure -- otherwise the
+    # recoveries-panel gate (``has_error = 1``) would silently skip a
+    # trace that Opus correctly identified as failing but the rule
+    # pass missed. We do NOT bump ``has_error`` to 0 from 1 the other
+    # direction: rule pass is conservative + may have caught something
+    # Opus dismissed; preserving the higher-recall signal is safer.
+    has_unrecovered = any(not e.recovered for e in result.events)
+    conn.execute(
+        """
+        UPDATE traces
+           SET failure_events = ?,
+               failure_label = ?,
+               failure_label_source = 'opus_events_derived',
+               ultimately_succeeded = ?,
+               has_error = CASE
+                   WHEN ? = 1 THEN 1
+                   ELSE has_error
+               END
+         WHERE id = ?
+        """,
+        (
+            payload,
+            summary_label,
+            new_succeeded,
+            1 if has_unrecovered else 0,
+            trace_id,
+        ),
+    )
+    return result
+
+
 __all__ = [
     "EVENTS_MAX_TOKENS",
     "EVENTS_MODEL",
@@ -767,6 +890,7 @@ __all__ = [
     "derive_ultimately_succeeded",
     "estimate_cost_usd",
     "extract_events",
+    "persist_events_for_trace",
     "require_api_key",
     "summarize_label",
 ]

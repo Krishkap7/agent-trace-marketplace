@@ -3,22 +3,33 @@
 Drag-drop a trace file (or paste raw content) -> stage to a tempfile ->
 :func:`trace_marketplace.ingest.pipeline.ingest_file` -> inline rule pass via
 :func:`trace_marketplace.enrich.failure_rules.persist_signals_for_trace` ->
+**inline Sonnet 4.6 judge + Opus 4.7 events extractor** ->
 per-file result with a link to the freshly-ingested trace.
 
 Architectural decisions worth flagging:
 
-* **No LLM-judge on the hot path.** Per-upload Sonnet calls would be 5-30s
-  of user-facing latency and unbounded cost. Fresh uploads land with
-  ``failure_label IS NULL``; the next ``scripts/judge_failures.py`` run
-  picks them up via its existing ``failure_label IS NULL`` gate. The
-  footer note tells the user this explicitly so the missing label
-  doesn't look like a bug.
+* **Full LLM classification on the upload hot path.** As of slice 10
+  follow-up, every validated upload runs through the same
+  classification pipeline as the batch scripts: rule pass ->
+  ``persist_judge_for_trace`` (Sonnet 4.6, ~$0.01 + 5-10s) ->
+  ``persist_events_for_trace`` (Opus 4.7, ~$0.10 + 10-20s). This
+  trades ~15-30s of upload latency + ~$0.10 per upload for a
+  fully-classified trace immediately visible in the UI. Earlier
+  iterations kept the LLM passes off the hot path (batch only) but
+  that confused users who expected the result block to surface a
+  semantic label right away. Both helpers have a no-raise contract
+  and degrade gracefully when ``ANTHROPIC_API_KEY`` is missing
+  (Streamlit Cloud demo without secrets configured -> uploads still
+  ingest, just without the semantic columns until the next batch
+  run picks them up via the existing ``WHERE failure_label IS NULL``
+  gate).
 
 * **Inline rule pass.** The rule signals are pure-Python, deterministic,
   and free, so running them on upload gives the result block something
   useful to display ("signals: loop, ended_on_error") and means the new
   trace shows up in the list view with ``has_error`` populated -- not as
-  an orphaned NULL row.
+  an orphaned NULL row. Runs BEFORE the LLM passes so the judge prompt
+  has the rule signals as a structural prior.
 
 * **Per-file outcome isolation.** ``_process_upload`` wraps the whole
   ingest+rule sequence in try/except so one malformed file can't tank
@@ -47,6 +58,7 @@ Architectural decisions worth flagging:
 from __future__ import annotations
 
 import logging
+import os
 import sqlite3
 import tempfile
 import uuid
@@ -57,6 +69,14 @@ from urllib.parse import quote
 
 import streamlit as st
 
+from trace_marketplace.enrich.failure_events import (
+    EventsResult,
+    persist_events_for_trace,
+)
+from trace_marketplace.enrich.failure_judge import (
+    JudgeResult,
+    persist_judge_for_trace,
+)
 from trace_marketplace.enrich.failure_rules import persist_signals_for_trace
 from trace_marketplace.enrich.recovered_recommendations import (
     persist_recommendations_for_trace,
@@ -95,14 +115,17 @@ _FORMAT_HELP: str = (
 )
 
 _FOOTER_NOTE: str = (
-    "**On `failure_label`.** Rule-based signals (`has_error`, "
-    "`failure_signals`) fire inline on upload. The semantic "
-    "`failure_label` -- the one-of-N taxonomy classification from "
-    "Sonnet 4.6 -- is deliberately kept off the upload path so "
-    "per-upload latency stays low and API costs stay bounded. Fresh "
-    "uploads land with `failure_label = NULL`; the next batch run of "
-    "`scripts/judge_failures.py` picks them up via its existing "
-    "`WHERE failure_label IS NULL` gate."
+    "**Full classification runs on every upload.** Rule-based signals "
+    "(`has_error`, `failure_signals`) fire first, followed by the "
+    "Sonnet 4.6 judge (`failure_label` + reasoning, ~$0.01 + 5-10s) "
+    "and the Opus 4.7 events extractor (`failure_events` + "
+    "`ultimately_succeeded`, ~$0.10 + 10-20s). The events pass "
+    "overwrites the Sonnet label with its own multi-event summary "
+    "and may flip `has_error` to `1` if it sees an unrecovered "
+    "failure the rule pass missed. Both LLM passes degrade "
+    "gracefully when `ANTHROPIC_API_KEY` is unset (uploads still "
+    "ingest; semantic columns stay NULL until the next batch run "
+    "of `scripts/judge_failures.py` + `scripts/extract_failure_events.py`)."
 )
 
 _SAFE_FALLBACK_FILENAME: str = "upload.bin"
@@ -205,11 +228,23 @@ class _UploadOutcome:
     gracefully when ``OPENAI_API_KEY`` is missing); a non-validated
     upload leaves it as ``None``.
 
-    ``recovered_recommendations`` is the slice-10 follow-up to
-    ``embed_and_similar``: for failing uploads (``has_error = 1``) we
-    additionally compute the top-k similar traces that recovered
-    in-session and render their recovery summaries on the upload result
-    page. Three-state semantics:
+    ``judge_result`` and ``events_result`` are the slice-10
+    full-classification follow-up: every validated upload gets the
+    Sonnet 4.6 judge run inline (writes ``failure_label`` +
+    ``failure_label_reasoning``) followed by the Opus 4.7 events
+    extractor (overwrites ``failure_label`` with the events-derived
+    summary, writes ``failure_events`` + ``ultimately_succeeded``,
+    and may flip ``has_error`` to 1 if Opus saw an unrecovered
+    failure the rule pass missed). Both pass through ``None`` when
+    the trace is out of scope (raw-blob / NULL atif / missing
+    ANTHROPIC_API_KEY) or when the API call failed -- the upload
+    pipeline guarantees a no-raise contract per file.
+
+    ``recovered_recommendations`` is the final pass: for failing
+    uploads (``has_error = 1``, possibly bumped from 0 by the events
+    pass above) we additionally compute the top-k similar traces
+    that recovered in-session and render their recovery summaries
+    on the upload result page. Three-state semantics:
 
     * ``None``      -- skipped (success / unknown trace, or upload was
                        a raw blob without rule-pass results).
@@ -224,6 +259,8 @@ class _UploadOutcome:
     signals: dict[str, bool] | None
     error: str | None
     embed_and_similar: EmbedAndSimilarResult | None = None
+    judge_result: JudgeResult | None = None
+    events_result: EventsResult | None = None
     recovered_recommendations: list[dict[str, Any]] | None = None
 
 
@@ -294,16 +331,51 @@ def _process_upload(
     if ingest_result.validated:
         embed_and_similar = embed_and_recommend_similar(conn, ingest_result.trace_id)
 
-    # Slice 10 follow-up: if the trace looks like a failure (rule pass
-    # set has_error = 1), pre-compute the "Recoveries from similar
-    # failures" list inline so the upload result page can render the
-    # panel immediately rather than waiting for the next batch refresh.
-    # Pure-local cosine NN over the existing embeddings -- no API
-    # calls, no cost. The helper itself is the gate (returns None for
-    # success / unknown traces), so we can call it unconditionally on
-    # validated uploads. Wrapped in try/except for the same reason as
-    # the rule pass: a buggy helper shouldn't break a perfectly good
-    # ingest.
+    # Slice 10: full LLM classification on the upload hot path.
+    #
+    # Sonnet 4.6 judge first -- writes ``failure_label`` + reasoning
+    # so the user gets a semantic label for every validated upload
+    # immediately, regardless of whether the rule pass flagged it
+    # as a failure. ~$0.01 + 5-10s per call. Then Opus 4.7 events
+    # extractor -- writes ``failure_events`` (per-event timeline +
+    # recovery info), overwrites ``failure_label`` with the events-
+    # derived summary, sets ``ultimately_succeeded``, and may flip
+    # ``has_error`` to 1 if Opus saw an unrecovered failure the rule
+    # pass missed. ~$0.10 + 10-20s.
+    #
+    # Both helpers are no-raise by contract (they swallow API errors
+    # and return None). Missing ANTHROPIC_API_KEY -> graceful skip
+    # so local dev without secrets keeps working. The wrapping
+    # try/except here is belt-and-braces against future helper bugs;
+    # the existing helpers won't trip it.
+    judge_result: JudgeResult | None = None
+    events_result: EventsResult | None = None
+    if ingest_result.validated:
+        try:
+            judge_result = persist_judge_for_trace(conn, ingest_result.trace_id)
+        except Exception:
+            log.exception(
+                "Judge pass failed for %s (%s); trace is still ingested "
+                "with rule-pass signals",
+                safe_name,
+                ingest_result.trace_id,
+            )
+        try:
+            events_result = persist_events_for_trace(conn, ingest_result.trace_id)
+        except Exception:
+            log.exception(
+                "Events pass failed for %s (%s); trace is still ingested "
+                "with judge label (if available)",
+                safe_name,
+                ingest_result.trace_id,
+            )
+
+    # Slice 10 follow-up: pre-compute the "Recoveries from similar
+    # failures" list. Runs AFTER the events pass because the events
+    # pass may have flipped ``has_error`` from 0 to 1 -- and the
+    # recoveries-panel gate (``has_error = 1``) is what decides
+    # whether we compute the cache at all. Pure-local cosine NN over
+    # the existing embeddings -- no API calls, no cost.
     recovered_recommendations: list[dict[str, Any]] | None = None
     if ingest_result.validated:
         try:
@@ -325,6 +397,8 @@ def _process_upload(
         signals=signals,
         error=None,
         embed_and_similar=embed_and_similar,
+        judge_result=judge_result,
+        events_result=events_result,
         recovered_recommendations=recovered_recommendations,
     )
 
@@ -369,12 +443,94 @@ def _render_outcome(outcome: _UploadOutcome) -> None:
         f"{_format_signals(outcome.signals)})"
     )
     st.markdown(f"[Open the trace ->]({trace_url})")
+    # Slice 10: surface the LLM classification (Sonnet judge label +
+    # Opus events count) BEFORE the recoveries panel so the user sees
+    # the headline label first, then the supporting evidence.
+    _render_llm_classification(outcome.judge_result, outcome.events_result)
     # Slice 10: render recovered-failures recommendations BEFORE the
     # slice-6 similar-traces panel. For failing uploads the recoveries
     # are the higher-signal payload (concrete advice, not just "this
     # other trace is vaguely related") so they deserve top billing.
     _render_recovered_recommendations(outcome.recovered_recommendations, trace_url)
     _render_similar_traces(outcome.embed_and_similar)
+
+
+def _render_llm_classification(
+    judge_result: JudgeResult | None,
+    events_result: EventsResult | None,
+) -> None:
+    """Inline LLM-classification summary on the upload result page.
+
+    Three-state semantics (matched to the helpers' return contract):
+
+    * Both ``None`` -- LLM passes were skipped (raw-blob upload, NULL
+      atif, missing ``ANTHROPIC_API_KEY``, or both calls failed). Render
+      a small caption that explains *why* it's missing rather than
+      silently omitting -- on the hosted demo without secrets configured
+      this is the expected state for every upload.
+    * ``judge_result`` only -- Sonnet ran but the events extractor
+      failed / was skipped. Show the Sonnet label + reasoning.
+    * Both populated -- show the events-derived label (Opus is more
+      detailed than Sonnet alone) plus the Sonnet reasoning paragraph,
+      plus the recovered/unrecovered event count split.
+
+    The label/reasoning rendering matches ``components.render_header``
+    so users see consistent treatment across upload-result and detail-
+    view pages.
+    """
+    if judge_result is None and events_result is None:
+        if not os.environ.get("ANTHROPIC_API_KEY"):
+            st.caption(
+                "_LLM classification skipped:_ ``ANTHROPIC_API_KEY`` "
+                "is not configured. Rule-based ``has_error`` + "
+                "``failure_signals`` are populated above; the semantic "
+                "label requires an Anthropic key. Configure it in "
+                "Streamlit Cloud secrets (or export it locally) to get "
+                "Sonnet-judged labels and Opus-extracted recovery "
+                "events on every upload."
+            )
+        else:
+            st.caption(
+                "_LLM classification failed for this upload._ Rule-"
+                "based signals are still applied; check the server "
+                "logs for the underlying error and re-upload to retry."
+            )
+        return
+
+    summary_label: str | None = None
+    if events_result is not None:
+        # Events extractor's summary label is what's persisted to the
+        # ``failure_label`` column (it overwrites Sonnet's). Mirror
+        # that here so the upload page shows the same final label as
+        # the detail view will.
+        from trace_marketplace.enrich.failure_events import summarize_label
+
+        summary_label = summarize_label(events_result.events).value
+    elif judge_result is not None:
+        summary_label = judge_result.label.value
+
+    bits: list[str] = []
+    if summary_label:
+        bits.append(f"**Label:** `{summary_label}`")
+    if events_result is not None:
+        recovered = sum(1 for e in events_result.events if e.recovered)
+        unrecovered = len(events_result.events) - recovered
+        if events_result.events:
+            bits.append(
+                f"**Events:** {len(events_result.events)} total "
+                f"(`{recovered}` recovered, `{unrecovered}` unrecovered)"
+            )
+        else:
+            bits.append("**Events:** none detected (clean trajectory)")
+
+    if bits:
+        st.markdown("  ·  ".join(bits))
+
+    if judge_result is not None and judge_result.reasoning.strip():
+        st.info(
+            f"**Judge reasoning** (Sonnet 4.6)\n\n> {judge_result.reasoning.strip()}",
+            icon=":material/psychology:",
+        )
 
 
 def _render_recovered_recommendations(
