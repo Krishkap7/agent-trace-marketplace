@@ -50,8 +50,26 @@ def _resolve_writable_db_path(source_db: Path) -> Path:
     detect the case once on startup and copy the seed DB into the OS
     tempdir so uploads work without any caller changes.
 
-    Tradeoffs:
+    Tradeoffs / why detection looks the way it does:
 
+    * **``os.access`` is NOT enough.** The previous version of this
+      function used ``os.access(source_db, os.W_OK)`` to detect the
+      read-only mount. POSIX gotcha: ``access(2)`` only inspects the
+      file's permission bits + the calling user's UID -- it explicitly
+      does NOT account for filesystem-level read-only mounts (Python
+      docs: "I/O operations may fail even when access() indicates
+      that they would succeed"). On Streamlit Cloud the seed DB has
+      user-writable permission bits because the git checkout created
+      it as a normal file; ``os.access`` returns ``True`` and we
+      skip the copy. The actual ``INSERT`` then trips ``EROFS``.
+      That bug shipped in the first hotfix and re-surfaced as
+      ``OperationalError: attempt to write a readonly database``
+      on the demo.
+    * **``os.O_RDWR`` is the actual probe.** Opening a file with
+      ``O_RDWR`` flag attempts to acquire write access from the
+      kernel without modifying any bytes; on a read-only mount it
+      fails immediately with ``EROFS`` (caught here as ``OSError``).
+      No file content is touched -- safe to call on every page load.
     * **Demo persistence model.** The writable copy lives in /tmp and
       gets wiped on container restart. For a demo deployment with a
       committed seed corpus this is the right tradeoff -- the seed
@@ -59,28 +77,32 @@ def _resolve_writable_db_path(source_db: Path) -> Path:
       during a session survive until the container recycles. For
       durable persistence we'd want Postgres / external storage --
       out of scope for now.
-    * **Detection.** Conservative: we use ``os.access(..., os.W_OK)``
-      to check if the file itself is writable. False positives (we
-      copy when we didn't have to) are harmless; false negatives (we
-      skip the copy when we should have copied) trip the original
-      bug, so we err toward copying.
     * **Idempotency.** If the copy already exists in /tmp we DO NOT
       overwrite it. Otherwise a Streamlit rerun during an active
       session would clobber the user's in-session uploads.
     """
-    if os.access(source_db, os.W_OK):
+    try:
+        fd = os.open(source_db, os.O_RDWR)
+    except OSError:
+        # Read-only mount, missing file, no write permission, anything
+        # the kernel rejects -- all paths land us in the /tmp fallback.
+        # We don't want to crash here; the fallback is correct in every
+        # one of those cases (and the missing-file case is already
+        # caught upstream in main()).
+        writable_path = Path(tempfile.gettempdir()) / source_db.name
+        if not writable_path.exists():
+            shutil.copy2(source_db, writable_path)
+            log.info(
+                "Read-only filesystem detected at %s; copied seed DB to %s "
+                "for write access. Uploads will live in /tmp until the "
+                "container recycles.",
+                source_db,
+                writable_path,
+            )
+        return writable_path
+    else:
+        os.close(fd)
         return source_db
-    writable_path = Path(tempfile.gettempdir()) / source_db.name
-    if not writable_path.exists():
-        shutil.copy2(source_db, writable_path)
-        log.info(
-            "Read-only filesystem detected at %s; copied seed DB to %s "
-            "for write access. Uploads will live in /tmp until the "
-            "container recycles.",
-            source_db,
-            writable_path,
-        )
-    return writable_path
 
 
 @st.cache_resource
