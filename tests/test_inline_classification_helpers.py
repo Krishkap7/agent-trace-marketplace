@@ -339,6 +339,78 @@ def test_events_helper_bumps_has_error_when_unrecovered_event_present(
     assert row["ultimately_succeeded"] == 0
 
 
+def test_events_helper_bumps_has_error_when_only_recovered_events_present(
+    conn, monkeypatch
+) -> None:
+    """Critical for the "Recovered failure" outcome chip variant.
+
+    A trace that hit a wall and recovered must end up at
+    ``(has_error=1, ultimately_succeeded=1)`` so the slice-10 outcome
+    chip renders as "Recovered failure" -- not "clean success".
+    Without bumping has_error here, a recovered trace would slip
+    through as clean and the recoveries panel (gated on has_error=1)
+    would silently skip it, erasing the recovery story from the UI
+    entirely.
+
+    This is the exact scenario that triggered this fix: a user uploaded
+    a "demo-recovered" trace, Opus correctly identified the recovered
+    event, but the directory chip still said "clean" because the rule
+    pass had has_error=0 and the events helper only bumped on
+    unrecovered events. ``has_error`` means "had failure events"; the
+    recovered-vs-not distinction is what ``ultimately_succeeded`` is
+    for.
+    """
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    conn.execute("UPDATE traces SET has_error = 0 WHERE id = ?", ("trace-under-test",))
+    client = _make_client(
+        [
+            _response(
+                _events_tool_use_block(
+                    [
+                        {
+                            "label": FailureLabel.LOOP.value,
+                            "step_start": 1,
+                            "step_end": 2,
+                            "recovered": True,
+                            "recovery_step": 2,
+                            "recovery_summary": "Re-read the error and tried a different approach.",
+                        }
+                    ]
+                )
+            )
+        ]
+    )
+
+    persist_events_for_trace(conn, "trace-under-test", client=client)
+
+    row = _row(conn)
+    # The "Recovered failure" outcome chip variant requires both flags.
+    assert row["has_error"] == 1
+    assert row["ultimately_succeeded"] == 1
+    # Summary label collapses to SUCCESS because all events recovered.
+    assert row["failure_label"] == FailureLabel.SUCCESS.value
+
+
+def test_events_helper_does_not_bump_has_error_for_empty_event_list(
+    conn, monkeypatch
+) -> None:
+    """A genuinely clean trace (Opus returned empty events list) must
+    NOT bump has_error. This pins the inverse of the recovered-events
+    case so we don't accidentally classify every Opus-processed trace
+    as "had errors". Empty events -> Opus saw a clean trajectory ->
+    has_error stays at whatever the rule pass set."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test-key")
+    conn.execute("UPDATE traces SET has_error = 0 WHERE id = ?", ("trace-under-test",))
+    client = _make_client([_response(_events_tool_use_block([]))])
+
+    persist_events_for_trace(conn, "trace-under-test", client=client)
+
+    row = _row(conn)
+    assert row["has_error"] == 0
+    assert row["ultimately_succeeded"] == 1
+    assert row["failure_label"] == FailureLabel.SUCCESS.value
+
+
 def test_events_helper_does_not_downgrade_has_error_from_1_to_0(
     conn, monkeypatch
 ) -> None:

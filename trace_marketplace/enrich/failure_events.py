@@ -845,13 +845,22 @@ def persist_events_for_trace(
     payload = json.dumps([e.to_dict() for e in result.events])
     # Writes: events JSON, summary label (overwrites any Sonnet value),
     # provenance, outcome flag. ``has_error`` gets a defensive bump to
-    # 1 if Opus saw any unrecovered failure -- otherwise the
-    # recoveries-panel gate (``has_error = 1``) would silently skip a
-    # trace that Opus correctly identified as failing but the rule
-    # pass missed. We do NOT bump ``has_error`` to 0 from 1 the other
-    # direction: rule pass is conservative + may have caught something
-    # Opus dismissed; preserving the higher-recall signal is safer.
-    has_unrecovered = any(not e.recovered for e in result.events)
+    # 1 whenever Opus extracted ANY events -- recovered or not. The
+    # column means "this trace ran into failures at some point", and
+    # the recovered-vs-unrecovered distinction is what
+    # ``ultimately_succeeded`` is for. The slice-10 outcome chip
+    # explicitly relies on this split: ``(has_error=1,
+    # ultimately_succeeded=1)`` renders as "Recovered failure" --
+    # exactly the state we want for a trace that hit a wall and
+    # escaped. Without the bump, a successfully-recovered trace
+    # would show as "clean success" in the directory chip + skip
+    # the recoveries panel (which gates on has_error=1), erasing
+    # the recovery story entirely.
+    #
+    # We do NOT downgrade has_error from 1 to 0 the other direction:
+    # rule pass is conservative + may have caught something Opus
+    # dismissed; preserving the higher-recall signal is safer.
+    has_any_event = bool(result.events)
     conn.execute(
         """
         UPDATE traces
@@ -869,7 +878,7 @@ def persist_events_for_trace(
             payload,
             summary_label,
             new_succeeded,
-            1 if has_unrecovered else 0,
+            1 if has_any_event else 0,
             trace_id,
         ),
     )
