@@ -20,8 +20,10 @@ binary: either the model emits a valid call or we retry.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import sqlite3
 from dataclasses import dataclass
 from typing import Any, Protocol
 
@@ -474,6 +476,105 @@ def require_api_key() -> None:
         )
 
 
+def persist_judge_for_trace(
+    conn: sqlite3.Connection,
+    trace_id: str,
+    *,
+    client: _AnthropicLike | None = None,
+) -> JudgeResult | None:
+    """Run the Sonnet 4.6 judge on one freshly-ingested trace and persist.
+
+    Mirrors the shape of
+    :func:`trace_marketplace.enrich.failure_rules.persist_signals_for_trace`
+    so the upload flow can chain rule pass -> embedding -> judge ->
+    events -> recommendations as a clean linear sequence. Writes
+    ``failure_label`` + ``failure_label_reasoning`` + sets
+    ``failure_label_source = 'sonnet_judge'``; does NOT commit (the
+    upload caller batches the commit with the other writes so the
+    whole row lands as one transaction).
+
+    Graceful no-ops (returns ``None``, never raises -- the upload
+    pipeline depends on every helper having a no-raise contract so
+    one failed pass can't tank the rest of the row):
+
+    * trace_id missing from the ``traces`` table
+    * ``atif IS NULL`` (raw-blob row, adapter failure -- nothing
+      semantic to judge)
+    * ``ANTHROPIC_API_KEY`` env var unset (Streamlit Cloud demo
+      without secrets configured -> we just skip rather than ask
+      the user to fix env)
+    * ATIF JSON parse failure
+    * Judge call failure (``JudgeError``, network error, anything
+      else) -- logged, swallowed; the upload still succeeds with
+      ``failure_label = NULL``
+
+    Returns the :class:`JudgeResult` on success so the caller can
+    surface the label + reasoning in the upload result UI without
+    a second DB read.
+    """
+    if not os.environ.get("ANTHROPIC_API_KEY"):
+        log.info(
+            "persist_judge_for_trace: ANTHROPIC_API_KEY missing; "
+            "skipping judge for trace %s",
+            trace_id,
+        )
+        return None
+
+    row = conn.execute(
+        "SELECT atif, failure_signals FROM traces WHERE id = ?", (trace_id,)
+    ).fetchone()
+    if row is None:
+        return None
+    atif_text = row["atif"] if "atif" in row.keys() else row[0]
+    if not atif_text:
+        return None
+
+    try:
+        traj = json.loads(atif_text)
+    except json.JSONDecodeError:
+        log.warning(
+            "persist_judge_for_trace: failed to parse ATIF for trace %s; skipping",
+            trace_id,
+        )
+        return None
+    if not isinstance(traj, dict):
+        return None
+
+    signals_text = row["failure_signals"] if "failure_signals" in row.keys() else row[1]
+    signals: dict[str, bool] = {}
+    if signals_text:
+        try:
+            parsed = json.loads(signals_text)
+            if isinstance(parsed, dict):
+                signals = {k: bool(v) for k, v in parsed.items()}
+        except json.JSONDecodeError:
+            # Bad signals JSON shouldn't block the judge -- it's a
+            # structural prior in the prompt, not a dependency.
+            pass
+
+    try:
+        result = judge_trace(traj, signals, client=client)
+    except Exception:  # noqa: BLE001 -- judge errors / network / SDK
+        log.exception(
+            "persist_judge_for_trace: judge call failed for trace %s; "
+            "leaving failure_label NULL (next batch run will pick it up)",
+            trace_id,
+        )
+        return None
+
+    conn.execute(
+        """
+        UPDATE traces
+           SET failure_label = ?,
+               failure_label_reasoning = ?,
+               failure_label_source = 'sonnet_judge'
+         WHERE id = ?
+        """,
+        (result.label.value, result.reasoning, trace_id),
+    )
+    return result
+
+
 __all__ = [
     "INPUT_PRICE_PER_MTOK",
     "JUDGE_MODEL",
@@ -483,5 +584,6 @@ __all__ = [
     "JudgeResult",
     "estimate_cost_usd",
     "judge_trace",
+    "persist_judge_for_trace",
     "require_api_key",
 ]
