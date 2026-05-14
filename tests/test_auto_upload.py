@@ -13,13 +13,16 @@ import threading
 import time
 from pathlib import Path
 
+import scripts.auto_upload as _au
 from scripts.auto_upload import (
     CLAUDE_DIR,
     CODEX_DIR,
     SessionHandler,
     get_settled,
+    process,
     staged_path,
 )
+from trace_marketplace.storage.db import connect, count_traces, init_schema
 
 
 def test_settled_returns_quiet_files() -> None:
@@ -210,6 +213,67 @@ def test_get_settled_is_thread_safe_against_concurrent_writes() -> None:
         t.join(timeout=1.0)
 
     assert not errors, f"get_settled raised under concurrent writes: {errors!r}"
+
+
+_CLAUDE_CODE_FIXTURE = Path("tests/fixtures/claude_code_minimal.jsonl")
+
+
+def test_process_inserts_row_into_db(tmp_path: Path) -> None:
+    """process() must copy the session file AND write a row to the SQLite DB.
+
+    Regression test for the gap where the daemon copied files to
+    ``data/raw/`` but the enrichment chain (ingest_file ->
+    persist_signals_for_trace -> embed_and_recommend_similar ->
+    persist_judge_for_trace -> persist_events_for_trace ->
+    persist_recommendations_for_trace) was not wired up to the DB connection.
+
+    We use no-API-key conditions so the LLM passes degrade gracefully;
+    the test pins that the basic DB write (raw_blob + atif +
+    failure_signals) happens unconditionally.
+    """
+    raw = _CLAUDE_CODE_FIXTURE.read_text(encoding="utf-8")
+
+    fake_claude_root = tmp_path / "fake_claude"
+    fake_claude_root.mkdir()
+    source = fake_claude_root / "session.jsonl"
+    source.write_text(raw, encoding="utf-8")
+
+    staging_root = tmp_path / "staging"
+    db_path = tmp_path / "test.db"
+
+    orig_roots = _au._SOURCE_ROOTS
+    _au._SOURCE_ROOTS = ((fake_claude_root, staging_root / "claude_code"),)
+    try:
+        conn = connect(db_path)
+        init_schema(conn)
+        assert count_traces(conn) == 0
+
+        process(source, conn)
+
+        assert count_traces(conn) == 1, "process() must insert a row into the DB"
+        row = conn.execute(
+            "SELECT source_format, raw_blob, atif, failure_signals FROM traces"
+        ).fetchone()
+        assert row["source_format"] == "claude_code"
+        assert row["raw_blob"], "raw_blob must be populated"
+        assert row["atif"] is not None, "ATIF must be populated for a valid Claude Code file"
+        assert row["failure_signals"] is not None, "rule pass must populate failure_signals"
+
+        staged = (staging_root / "claude_code" / "session.jsonl")
+        assert staged.exists(), "process() must copy the file to the staging dir"
+        conn.close()
+    finally:
+        _au._SOURCE_ROOTS = orig_roots
+
+
+def test_process_does_not_raise_on_vanished_file(tmp_path: Path) -> None:
+    """process() must return silently when the source file is gone."""
+    db_path = tmp_path / "test.db"
+    conn = connect(db_path)
+    init_schema(conn)
+    process(Path("/nonexistent/session.jsonl"), conn)
+    assert count_traces(conn) == 0
+    conn.close()
 
 
 def test_staged_path_preserves_distinguishing_subdir() -> None:

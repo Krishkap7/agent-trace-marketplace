@@ -3,10 +3,13 @@
 Watches ``~/.claude/projects/`` and ``~/.codex/sessions/`` recursively.
 When a ``.jsonl`` file goes quiet for ``--debounce-seconds`` (default 10),
 the file is copied into ``data/raw/{claude_code,codex}/`` and run through
-``ingest_file`` -> ``persist_signals_for_trace`` -> ``embed_and_recommend_similar``
-so the row lands in ``data/marketplace.db`` fully enriched (raw_blob +
-ATIF + failure_signals + embedding) the way the upload page would have
-ingested it.
+the full enrichment pipeline so the row lands in ``data/marketplace.db``
+fully enriched the way the upload page would have ingested it:
+
+``ingest_file`` -> ``persist_signals_for_trace`` ->
+``embed_and_recommend_similar`` -> ``persist_judge_for_trace`` (Sonnet 4.6,
+gated on ``ANTHROPIC_API_KEY``) -> ``persist_events_for_trace`` (Opus 4.7,
+gated on ``ANTHROPIC_API_KEY``) -> ``persist_recommendations_for_trace``
 
 Local-only. The hosted Streamlit deployment picks up new traces when the
 user pushes the updated ``data/marketplace.db`` to GitHub.
@@ -44,7 +47,12 @@ from pathlib import Path
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
+from trace_marketplace.enrich.failure_events import persist_events_for_trace
+from trace_marketplace.enrich.failure_judge import persist_judge_for_trace
 from trace_marketplace.enrich.failure_rules import persist_signals_for_trace
+from trace_marketplace.enrich.recovered_recommendations import (
+    persist_recommendations_for_trace,
+)
 from trace_marketplace.ingest.pipeline import ingest_file
 from trace_marketplace.search.runner import embed_and_recommend_similar
 from trace_marketplace.storage.db import connect, init_schema
@@ -179,8 +187,8 @@ def process(source: Path, conn: sqlite3.Connection) -> None:
        get rotated/deleted by the agents themselves).
     2. ``ingest_file`` -> always runs; writes raw_blob + (if the
        adapter validated) ATIF.
-    3. If ``ingest_result.validated`` is true, run the enrichment
-       pair just like the upload view does:
+    3. If ``ingest_result.validated`` is true, run the full enrichment
+       chain just like the upload view does:
 
        * ``persist_signals_for_trace`` -> rule-based
          ``failure_signals`` and, if ``has_error`` was previously
@@ -188,12 +196,24 @@ def process(source: Path, conn: sqlite3.Connection) -> None:
        * ``embed_and_recommend_similar`` -> OpenAI embedding (gated
          on ``OPENAI_API_KEY``; never raises) so the new trace is
          immediately searchable from the NL query box.
+       * ``persist_judge_for_trace`` -> Sonnet 4.6 judge (gated on
+         ``ANTHROPIC_API_KEY``; never raises) writes
+         ``failure_label`` + ``failure_label_reasoning``.
+       * ``persist_events_for_trace`` -> Opus 4.7 events extractor
+         (gated on ``ANTHROPIC_API_KEY``; never raises) writes
+         ``failure_events``, overwrites ``failure_label`` with the
+         events-derived summary, sets ``ultimately_succeeded``, and
+         may flip ``has_error`` to 1 if Opus saw an unrecovered
+         failure the rule pass missed.
+       * ``persist_recommendations_for_trace`` -> cosine NN over
+         existing embeddings (no API cost) writes
+         ``recovered_recommendations`` for failing traces.
 
     Raw-blob-only rows (adapter failure / unknown format) skip the
-    enrichment pair: there's no ATIF to compute signals against or
+    enrichment chain: there's no ATIF to compute signals against or
     text to embed, so the calls would be no-ops at best and a
     breakage vector at worst if a future enrichment step doesn't
-    null-check as gracefully as today's pair.
+    null-check as gracefully as today's chain.
 
     Must never raise. Every failure path logs and returns -- a
     malformed adapter, a missing API key, even a vanished source
@@ -244,6 +264,17 @@ def process(source: Path, conn: sqlite3.Connection) -> None:
             elif embed.similar:
                 preview = ", ".join(hit.trace_id for hit in embed.similar[:3])
                 log.info("  similar: %s", preview)
+
+            judge = persist_judge_for_trace(conn, trace_id)
+            if judge is not None:
+                log.info("  judge label: %s", judge.label.value)
+
+            events = persist_events_for_trace(conn, trace_id)
+            if events is not None:
+                log.info("  events: %d total", len(events.events))
+
+            persist_recommendations_for_trace(conn, trace_id)
+            conn.commit()
     except Exception as exc:
         log.warning("- %s: %s", source.name, exc)
 
